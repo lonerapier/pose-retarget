@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>bim — webcam to bimanual retargeting</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; color: #eee; font-family: system-ui, sans-serif; }
+      #app { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+      #video, #pose-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #video { transform: scaleX(-1); }
+      #pose-canvas { transform: scaleX(-1); pointer-events: none; }
+      #status { position: absolute; top: 8px; left: 8px; font-size: 12px; background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="pose-canvas"></canvas>
+      <div id="status">pose: initializing…</div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
