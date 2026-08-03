@@ -11,3 +11,18 @@ dependencies = [
     "uvicorn[standard]>=0.52.0",
     "websockets>=17.0",
 ]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# Enable standard linting rules
+select = ["E", "F", "W", "I"]
+# Set the indent width for linting as well
+# This is used by some linting rules that care about indentation.
+
+[tool.ruff.format]
+# Use spaces for indentation
+indent-style = "space"
+# Use double quotes for strings
+quote-style = "double"

@@ -4,8 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "sync-wasm": "rm -rf public/mediapipe/wasm && mkdir -p public/mediapipe && cp -R node_modules/@mediapipe/tasks-vision/wasm public/mediapipe/wasm",
+    "postinstall": "npm run sync-wasm",
+    "dev": "npm run sync-wasm && vite",
+    "build": "npm run sync-wasm && tsc && vite build",
     "preview": "vite preview"
   },
   "devDependencies": {

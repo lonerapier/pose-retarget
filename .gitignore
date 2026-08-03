@@ -1,6 +1,15 @@
 node_modules/
+build/
 dist/
-.venv/
+
+# copied from node_modules by `npm run sync-wasm`
+frontend/public/mediapipe/
+wheels/
 __pycache__/
 *.pyc
+*.py[oc]
+*.egg-info
+
+# Virtual environments
+.venv/
 .DS_Store

@@ -17,9 +17,10 @@ export class PoseTracker {
   }
 
   async init(): Promise<void> {
-    const vision = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm',
-    )
+    // Served from public/, copied out of node_modules by `npm run sync-wasm`. The WASM
+    // build must match the installed @mediapipe/tasks-vision exactly — pulling it from
+    // a CDN's `@latest` drifts and blows up with `ASM_CONSTS[code] is not a function`.
+    const vision = await FilesetResolver.forVisionTasks('/mediapipe/wasm')
     this.landmarker = await PoseLandmarker.createFromOptions(vision, {
       baseOptions: {
         modelAssetPath:
