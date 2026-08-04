@@ -11,6 +11,11 @@
       #video { transform: scaleX(-1); }
       #pose-canvas { transform: scaleX(-1); pointer-events: none; }
       #status { position: absolute; top: 8px; left: 8px; font-size: 12px; background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 4px; }
+      #record-controls { position: absolute; bottom: 12px; left: 8px; display: flex; gap: 8px; align-items: center; font-size: 12px; background: rgba(0,0,0,0.6); padding: 6px 10px; border-radius: 4px; }
+      #record-controls select, #record-controls button { font: inherit; padding: 3px 8px; border-radius: 3px; border: 1px solid #555; background: #222; color: #eee; }
+      #record-controls button { cursor: pointer; }
+      #record-controls.recording button { background: #a02020; border-color: #c04040; }
+      #clip-info { opacity: 0.8; }
     </style>
   </head>
   <body>
@@ -18,6 +23,9 @@
       <video id="video" autoplay playsinline muted></video>
       <canvas id="pose-canvas"></canvas>
       <div id="status">pose: initializing…</div>
+      <!-- Motion battery recorder (NEXT_STEPS §5). Not mirrored with the
+           video, so the text stays readable. -->
+      <div id="record-controls"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
