@@ -11,11 +11,15 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
+from app.battery import as_dicts as battery_as_dicts
 from app.control.position import PositionController
+from app.record import DEFAULT_DIR, PoseRecorder
 from app.retarget.mapper import Landmark, PoseFrame
 from app.retarget.retargeter import Retargeter
 from app.sim.simulator import Simulator
@@ -41,6 +45,9 @@ class SimState:
         self.qpos_target = self.sim.actuated_qpos()
         self.viewer = None
         self.tick_count = 0
+        self.recorder = PoseRecorder(
+            Path(os.environ.get("POSE_RECORD_DIR", DEFAULT_DIR))
+        )
 
         # The model's timestep (2ms) is much shorter than a 60Hz tick, so one
         # mj_step per tick would run the sim at 0.12x realtime — the arm could
@@ -118,9 +125,15 @@ async def lifespan(app: FastAPI):
         state.viewer = mujoco.viewer.launch_passive(state.sim.model, state.sim.data)
     app.state.sim_state = state
 
+    if clip := os.environ.get("POSE_RECORD"):
+        state.recorder.start(clip)
+
     loop_task = asyncio.create_task(_physics_loop(state))
     yield
     loop_task.cancel()
+    # A clip left open at shutdown is still a valid clip — every line is
+    # already flushed — but close it so the summary gets logged.
+    state.recorder.stop()
     if state.viewer is not None:
         state.viewer.close()
 
@@ -140,6 +153,36 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+class StartClip(BaseModel):
+    name: str
+    description: str | None = None
+
+
+# Recording is driven over HTTP rather than by an env var alone so the whole
+# motion battery can be captured in one backend session — and so the browser
+# page (which is where the operator is actually looking while performing the
+# motions) can drive it. POSE_RECORD=<name> still auto-starts one clip at boot.
+@app.get("/record")
+def record_status() -> dict:
+    return app.state.sim_state.recorder.status().as_dict()
+
+
+@app.get("/record/battery")
+def record_battery() -> dict:
+    return {"battery": battery_as_dicts()}
+
+
+@app.post("/record/start")
+def record_start(body: StartClip) -> dict:
+    recorder = app.state.sim_state.recorder
+    return recorder.start(body.name, body.description).as_dict()
+
+
+@app.post("/record/stop")
+def record_stop() -> dict:
+    return app.state.sim_state.recorder.stop().as_dict()
 
 
 def _fmt(lm: Landmark) -> str:
@@ -171,6 +214,10 @@ async def pose_socket(websocket: WebSocket) -> None:
         while True:
             msg = await websocket.receive_json()
             frame = PoseFrame(**msg)
+            # Record the raw payload, not `frame`, and only once it has parsed:
+            # the clip then keeps every field the client sent (including ones
+            # PoseFrame does not read yet) without ever storing garbage.
+            state.recorder.write(msg)
             state.qpos_target = state.retargeter.solve(frame)
             frame_count += 1
             if frame_count % 30 == 0:  # ~once/sec at 30fps

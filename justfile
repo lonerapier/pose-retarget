@@ -59,6 +59,39 @@ sim-check:
 retarget-check:
     cd backend && PYTHONPATH=. uv run python scripts/retarget_check.py
 
+# Verify the hand-orientation math (SEW-Mimic stage 3's input) against known rotations
+hand-check:
+    cd backend && uv run python scripts/check_hand_frame.py
+
+# TODO: maybe can remove this as well.
+# Verify the closed-form SEW stage 1/2 derivation against MuJoCo forward kinematics
+sew-check:
+    cd backend && uv run python scripts/check_sew_closed_form.py
+
+# TODO: remove this
+# Replay recorded pose clips through the retargeting stack. Deterministic, no
+# camera or browser: this is how retargeting changes get A/B'd.
+#   just replay fixtures/fast_wave.jsonl
+#   just replay "fixtures/*.jsonl --summary-json runs/after.json"
+replay *ARGS:
+    cd backend && uv run python scripts/replay.py {{ARGS}}
+
+# Replay the whole battery and write summaries, so two revisions can be diffed.
+#   just battery before   # ... make a change ...   just battery after
+#   diff <(jq . backend/runs/before.json) <(jq . backend/runs/after.json)
+battery LABEL="run":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd backend
+    shopt -s nullglob
+    clips=(fixtures/*.jsonl)
+    if [ ${#clips[@]} -eq 0 ]; then
+      echo "no clips in backend/fixtures/ — record some first, see fixtures/README.md" >&2
+      exit 1
+    fi
+    uv run python scripts/replay.py "${clips[@]}" --quiet \
+      --out-dir "runs/{{LABEL}}" --summary-json "runs/{{LABEL}}.json"
+
 # Open the native MuJoCo viewer on the bimanual model, disconnected from the backend (standalone sanity check)
 sim-view:
     cd backend && uv run python -m mujoco.viewer --mjcf=../openarm_mujoco/v2/openarm_bimanual.xml
