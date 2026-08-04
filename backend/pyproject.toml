@@ -5,6 +5,7 @@ description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
+    "mediapy>=1.2.7",
     "mujoco>=3.6.0",
     "numpy>=2.5.1",
     "scipy>=1.18.0",
@@ -26,3 +27,6 @@ select = ["E", "F", "W", "I"]
 indent-style = "space"
 # Use double quotes for strings
 quote-style = "double"
+
+[dependency-groups]
+dev = ["ipykernel>=7.3.0", "matplotlib>=3.11.1"]

@@ -49,14 +49,15 @@ class Simulator:
     def actuated_qvel(self) -> np.ndarray:
         return self.data.qvel[self.actuator_dofadr].copy()
 
-    def gravity_compensation(self) -> np.ndarray:
-        """Return per-actuator torque that cancels gravity/bias forces at the current state."""
-        return self.data.qfrc_bias[self.actuator_dofadr].copy()
-
     def step(self, ctrl: np.ndarray) -> None:
+        """Advance one timestep. Every actuator in this model is a `<position>`
+        actuator, so `ctrl` is a vector of target joint angles in radians (see
+        PositionController), not torques."""
         self.data.ctrl[:] = ctrl
         mujoco.mj_step(self.model, self.data)
-        logger.debug("t=%.3f ctrl=%s qpos=%s", self.data.time, ctrl, self.actuated_qpos())
+        logger.debug(
+            "t=%.3f ctrl=%s qpos=%s", self.data.time, ctrl, self.actuated_qpos()
+        )
 
     @property
     def qpos(self) -> np.ndarray:
