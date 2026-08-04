@@ -4,7 +4,9 @@ import {
   type PoseLandmarkerResult,
 } from '@mediapipe/tasks-vision'
 
-export type PoseCallback = (result: PoseLandmarkerResult) => void
+/** `timestamp` is the one handed to MediaPipe, so a second model can be run
+ * against the same video frame without the two drifting apart. */
+export type PoseCallback = (result: PoseLandmarkerResult, timestamp: number) => void
 
 /** Runs MediaPipe PoseLandmarker in-browser (WASM/GPU) against a live webcam stream. */
 export class PoseTracker {
@@ -44,8 +46,9 @@ export class PoseTracker {
     this.running = true
     const loop = () => {
       if (!this.running) return
-      const result = this.landmarker!.detectForVideo(this.video, performance.now())
-      onResult(result)
+      const timestamp = performance.now()
+      const result = this.landmarker!.detectForVideo(this.video, timestamp)
+      onResult(result, timestamp)
       requestAnimationFrame(loop)
     }
     requestAnimationFrame(loop)
