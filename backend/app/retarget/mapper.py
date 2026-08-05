@@ -10,8 +10,8 @@ position and reach, which live in retargeter.py.
 import numpy as np
 from pydantic import BaseModel
 
-# Below this (in landmark units) the shoulder/elbow/wrist triple is degenerate
-# — landmarks collapsed onto each other, or the subject isn't really detected —
+# Below this (in metres) the shoulder/elbow/wrist triple is degenerate,
+# landmarks collapsed onto each other, or the subject isn't really detected
 # and the direction of the arm is meaningless.
 MIN_ARM_LENGTH = 1e-3
 
@@ -20,13 +20,29 @@ MIN_ARM_LENGTH = 1e-3
 # meaningful direction.
 MIN_HAND_LENGTH = 1e-4
 
+# Below this the shoulder line or the spine has collapsed and the torso frame
+# it would define is arbitrary. Same units and the same reasoning as
+# MIN_ARM_LENGTH; a real torso is a third of a metre across either way.
+MIN_TORSO_LENGTH = 1e-3
+
+# How square the shoulder line and the spine have to be before the chest normal
+# built from them is trusted. This is |sin| of the angle between the two, so
+# 0.1 is about 6 degrees — far below anything anatomy produces, and reached only
+# when a landmark is badly wrong.
+MIN_TORSO_SQUARENESS = 0.1
+
 
 class Landmark(BaseModel):
-    """MediaPipe body landmark: x/y normalized to the video frame (x: 0=left
-    edge, 1=right edge; y: 0=top, 1=bottom), z roughly the same scale with
-    the hips as a rough depth origin (more negative = closer to the camera).
-    These are the RAW camera-frame landmarks, not the mirrored image shown on
-    screen — the mirror is CSS-only, for display, and isn't reflected here.
+    """One MediaPipe **world** landmark: metres, right-handed, with the origin
+    at the midpoint of the hips.
+
+    Axis directions are the same in both spaces and are the RAW camera frame,
+    not the mirrored image shown on screen — the mirror is CSS-only, for
+    display, and isn't reflected here:
+
+        x  toward the image's right edge
+        y  downward
+        z  away from the camera (more negative = closer to it)
     """
 
     x: float
@@ -36,16 +52,20 @@ class Landmark(BaseModel):
     def as_array(self) -> np.ndarray:
         return np.array([self.x, self.y, self.z])
 
+    def _fmt(self) -> str:
+        return f"({self.x:.3f}, {self.y:.3f}, {self.z:.3f})"
+
 
 class HandLandmarks(BaseModel):
     """The subset of MediaPipe's 21 hand landmarks that fixes a hand frame.
 
     https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker
 
-    Same normalized coordinate convention as Landmark, but note MediaPipe scales
-    hand-landmark z by the *hand's* own size rather than the body's, so hand and
-    body landmarks are not in a common metric space. Only differences taken
-    within one hand are used below, which keeps that from mattering.
+    Same axes and units as Landmark. These are the hand model's own world
+    landmarks, but MediaPipe centres them on the *hand*, while the body's are
+    centred on the hips. The two therefore share no origin, and a vector from a
+    body landmark to a hand landmark would be meaningless. Only differences
+    taken within hand landmarks are useful.
 
     `thumb_tip` and `index_tip` are carried but not yet consumed: finger spread
     is the natural source of a gripper command (NEXT_STEPS §15 Q5), and recorded
@@ -65,16 +85,17 @@ class PoseFrame(BaseModel):
     """One frame of the landmarks relevant to bimanual retargeting.
 
     Everything past the six arm landmarks is optional so that a recording made
-    before a field existed — or a client that only runs the pose model — still
+    before a field existed, or a client that only runs the pose model, still
     parses. `left_*`/`right_*` are always the *subject's* sides, which map
     directly onto the robot's own left/right arms.
 
-    Not yet consumed by the retargeter, but sent and recorded now:
-    - hips, which §6.2 needs to build a torso frame
-    - hands, which SEW-Mimic stage 3 (§7.4) needs for wrist orientation
+    `left_hip`/`right_hip` build the torso frame and are consumed. They stay optional
+    so a frame from a client that only sends the six arm landmarks still parses, and
+    `torso_frame` falls back to the camera frame.
 
-    Both exist so the motion battery does not have to be re-recorded when those
-    steps land.
+    Hands are sent and logged but not yet consumed: SEW-Mimic stage 3 (§7.4)
+    needs them for wrist orientation, and joints 5-7 have no target until it
+    lands.
     """
 
     left_shoulder: Landmark
@@ -95,27 +116,91 @@ class PoseFrame(BaseModel):
     # accounting in §6.4 cannot be reconstructed without.
     t_capture: float | None = None
 
+    @property
+    def hips(self) -> tuple[Landmark, Landmark] | None:
+        """Both hips, or None if either is missing."""
+        if self.left_hip is None or self.right_hip is None:
+            return None
+        return self.left_hip, self.right_hip
+
 
 def to_robot_axes(delta: np.ndarray) -> np.ndarray:
-    """Permute a landmark-space displacement into the robot's world axes.
+    """Permute a landmark-space displacement into robot axes.
 
-    Axis mapping, first-pass and UNVERIFIED against a real camera — flip signs
-    by watching motion in the live viewer:
+    This is a *camera*-frame result: it maps the camera's axes onto the robot's,
+    and is only the same thing as a body-centric direction when the subject
+    happens to be square to the camera and upright. `torso_frame` is what
+    removes that assumption; this stays as the common first step because the
+    torso frame is itself built out of vectors that have been through here.
+
+    Axis mapping:
     - forward (robot +x): wrist closer to the camera than the shoulder
       (z more negative) -> reach further forward.
-    - left (robot +y): landmarks are in the raw, unmirrored camera frame —
-      like a photo, not a mirror — so the subject's own left hand moving
-      further left increases its image-x. No extra flip needed.
-    - up (robot +z): image y increases downward -> flip sign.
-
-    This is a pure permutation with sign flips, so it preserves vector norms —
-    which is what lets arm_extension() normalize before or after mapping.
-
-    Its determinant is +1, so it is a rotation rather than a reflection: it
-    preserves handedness as well as length. hand_orientation() depends on that
-    — a reflection here would silently swap the two hands' chirality.
+    - left (robot +y): landmarks are in the raw, unmirrored camera frame,
+      like a photo, not a mirror, so the subject's own left hand moving
+      further left increases its image-x.
+    - up (robot +z): image y increases downward, so we flip the sign.
     """
     return np.array([-delta[2], delta[0], -delta[1]])
+
+
+def _midpoint(a: Landmark, b: Landmark) -> np.ndarray:
+    return 0.5 * (a.as_array() + b.as_array())
+
+
+def torso_frame(frame: PoseFrame) -> np.ndarray | None:
+    """The subject's body-centric frame, as a rotation matrix in robot axes.
+
+    Columns are the torso's own axes expressed in robot axes, so `R.T @ v`
+    takes a camera-frame vector into the torso frame — which is the frame
+    SEW-Mimic's inputs are defined in. Without it, `u` and `l` are camera
+    vectors.
+
+    y_t: across the chest, right shoulder -> left     (robot +y is left)
+    z_t: up the spine, hip midpoint -> shoulder midpoint
+    x_t: out of the chest, y_t x z_t
+
+    Built in that order because the two measured directions are not exactly
+    perpendicular — a real spine is not square to a real shoulder line, and the
+    landmarks are noisy besides. The cross products resolve that in favour of
+    the shoulder line, which is measured across the widest, best-localized pair
+    of landmarks on the upper body; the spine only has to fix the roll about it.
+
+    Facing the camera square and upright this returns approximately the identity,
+    which is the sanity check to run first if the arms start moving the wrong way.
+
+    Returns None when the hips are absent (a client sending only the six arm
+    landmarks), or when the torso is too collapsed to define a frame. Callers
+    should fall back to the camera frame rather than treat None as identity
+    silently — it is the difference between "no torso correction available" and
+    "the torso is upright".
+    """
+    hips = frame.hips
+    if hips is None:
+        return None
+    left_hip, right_hip = hips
+
+    y_t = to_robot_axes(
+        frame.left_shoulder.as_array() - frame.right_shoulder.as_array()
+    )
+    z_t = to_robot_axes(
+        _midpoint(frame.left_shoulder, frame.right_shoulder)
+        - _midpoint(left_hip, right_hip)
+    )
+    across, spine = float(np.linalg.norm(y_t)), float(np.linalg.norm(z_t))
+    if across < MIN_TORSO_LENGTH or spine < MIN_TORSO_LENGTH:
+        return None
+    y_t, z_t = y_t / across, z_t / spine
+
+    x_t = np.cross(y_t, z_t)
+    # |y x z| = sin(angle between them); near zero means the spine has folded
+    # onto the shoulder line and the chest normal is arbitrary.
+    squareness = float(np.linalg.norm(x_t))
+    if squareness < MIN_TORSO_SQUARENESS:
+        return None
+    x_t = x_t / squareness
+
+    return np.column_stack([x_t, y_t, np.cross(x_t, y_t)])
 
 
 def arm_extension(shoulder: Landmark, elbow: Landmark, wrist: Landmark) -> np.ndarray:
@@ -143,6 +228,33 @@ def arm_extension(shoulder: Landmark, elbow: Landmark, wrist: Landmark) -> np.nd
     if arm_length < MIN_ARM_LENGTH:
         return np.zeros(3)
     return to_robot_axes(wrist.as_array() - shoulder.as_array()) / arm_length
+
+
+def limb_directions(
+    shoulder: Landmark, elbow: Landmark, wrist: Landmark
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """The subject's two limb *directions* — upper arm and forearm — as unit
+    vectors in robot axes. SEW-Mimic's stage-1/2 input (NEXT_STEPS §0.2).
+
+    This is the orientation-retargeting counterpart of arm_extension(): same
+    three landmarks, but the length of the arm is thrown away instead of being
+    the whole signal. That is the point — a direction is what the robot's
+    shoulder and elbow joints can actually reproduce exactly, whereas a
+    shoulder->wrist position has to be squeezed into a reachable shell first.
+    It also demotes monocular depth error from perturbing a target position to
+    perturbing a direction.
+
+    Returns None when either limb is too short in landmark units to carry a
+    direction — collapsed landmarks, or no real detection. Callers should hold
+    the previous pose rather than steer the arm from a meaningless vector.
+    """
+    upper_arm = to_robot_axes(elbow.as_array() - shoulder.as_array())
+    forearm = to_robot_axes(wrist.as_array() - elbow.as_array())
+    upper_len = float(np.linalg.norm(upper_arm))
+    fore_len = float(np.linalg.norm(forearm))
+    if upper_len < MIN_ARM_LENGTH or fore_len < MIN_ARM_LENGTH:
+        return None
+    return upper_arm / upper_len, forearm / fore_len
 
 
 def hand_orientation(hand: HandLandmarks, side: str) -> np.ndarray | None:

@@ -6,11 +6,12 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+# Thin wrapper around openarm_mujoco/v2/openarm_bimanual.xml (a submodule, so we
+# don't edit it in place) that attaches the arms unchanged into a lit scene with
+# a pale skybox — the bare model renders near-black arms on a black background.
+# Bodies, joints, actuators and sites all keep their original names.
 MODEL_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "openarm_mujoco"
-    / "v2"
-    / "openarm_bimanual.xml"
+    Path(__file__).resolve().parents[2] / "assets" / "viewer_scene.xml"
 )
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ class Simulator:
         self.actuator_qposadr = self.model.jnt_qposadr[joint_ids]
         self.actuator_dofadr = self.model.jnt_dofadr[joint_ids]
 
-        actuator_names = [
+        self.actuator_names = [
             mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
             for i in range(self.model.nu)
         ]
@@ -41,7 +42,7 @@ class Simulator:
             self.model.nu,
             self.model.opt.timestep,
         )
-        logger.info("actuators (%d): %s", self.model.nu, actuator_names)
+        logger.info("actuators (%d): %s", self.model.nu, self.actuator_names)
 
     def actuated_qpos(self) -> np.ndarray:
         return self.data.qpos[self.actuator_qposadr].copy()

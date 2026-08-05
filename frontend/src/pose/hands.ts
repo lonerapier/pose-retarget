@@ -2,6 +2,7 @@ import {
   FilesetResolver,
   HandLandmarker,
   type HandLandmarkerResult,
+  type Landmark,
   type NormalizedLandmark,
 } from '@mediapipe/tasks-vision'
 
@@ -16,10 +17,26 @@ export const HAND_INDEX = {
   pinkyMcp: 17,
 } as const
 
-/** One hand's landmarks, already assigned to a side of the *subject's* body. */
+/**
+ * One detected hand, carrying both of MediaPipe's coordinate spaces.
+ *
+ * Both are needed and they are not interchangeable. `landmarks` are normalized
+ * to the image, which is the only space that can be compared against the pose
+ * model's wrists for side assignment. `worldLandmarks` are metric and
+ * isotropic, which is the only space in which the *directions* between two
+ * landmarks are meaningful — normalized x and y are divided by frame width and
+ * height respectively, so on a non-square frame they carry an aspect-ratio
+ * stretch that bends every direction derived from them.
+ */
+export type HandFrame = {
+  landmarks: NormalizedLandmark[]
+  worldLandmarks: Landmark[]
+}
+
+/** The detected hands, already assigned to a side of the *subject's* body. */
 export type HandAssignment = {
-  left?: NormalizedLandmark[]
-  right?: NormalizedLandmark[]
+  left?: HandFrame
+  right?: HandFrame
 }
 
 /**
@@ -101,19 +118,22 @@ export function assignHands(
     right: maxDistance,
   }
 
-  for (const landmarks of hands.landmarks) {
+  for (const [i, landmarks] of hands.landmarks.entries()) {
     const wrist = landmarks[HAND_INDEX.wrist]
-    if (!wrist) continue
+    const worldLandmarks = hands.worldLandmarks[i]
+    if (!wrist || !worldLandmarks) continue
     for (const side of ['left', 'right'] as const) {
-      // Image-plane distance only: MediaPipe's pose z and hand z are scaled by
-      // different references (body vs hand size), so including z would be
-      // comparing two different units.
+      // Image-plane distance only, and against the *normalized* wrists: this is
+      // the one comparison that has to stay in image space, since the pose
+      // model's world landmarks are hip-centred and the hand model's are
+      // hand-centred — two different origins, so a distance between them would
+      // be meaningless. Dropping z for the same reason.
       const dx = wrist.x - wrists[side].x
       const dy = wrist.y - wrists[side].y
       const distance = Math.hypot(dx, dy)
       if (distance < best[side]) {
         best[side] = distance
-        assignment[side] = landmarks
+        assignment[side] = { landmarks, worldLandmarks }
       }
     }
   }
@@ -121,7 +141,7 @@ export function assignHands(
   // Both wrists claimed the same detection — one hand occluding the other, or
   // one wrist badly mislocated. Keep the closer match and drop the other rather
   // than sending the same hand as both.
-  if (assignment.left && assignment.left === assignment.right) {
+  if (assignment.left && assignment.left.landmarks === assignment.right?.landmarks) {
     delete assignment[best.left <= best.right ? 'right' : 'left']
   }
   return assignment
