@@ -23,6 +23,7 @@ import numpy as np
 from app.retarget.ik import solve_site_ik
 from app.retarget.mapper import PoseFrame, arm_extension, limb_directions, torso_frame
 from app.retarget.sew import STAGE12_JOINTS, Stage12Solver
+from app.retarget.smoothing import FilterConfig, LandmarkFilter
 from app.sim.simulator import Simulator
 
 logger = logging.getLogger(__name__)
@@ -108,13 +109,24 @@ class ArmGeometry:
 
 
 class Retargeter:
-    def __init__(self, sim: Simulator, mode: str | None = None) -> None:
+    def __init__(
+        self,
+        sim: Simulator,
+        mode: str | None = None,
+        smoothing: FilterConfig | None = None,
+    ) -> None:
         self.model = sim.model
         self.actuator_qposadr = sim.actuator_qposadr
 
         self.mode = (mode or os.environ.get("RETARGET_MODE") or DEFAULT_MODE).lower()
         if self.mode not in MODES:
             raise ValueError(f"unknown retarget mode {self.mode!r}, expected {MODES}")
+
+        # Landmark smoothing sits inside the retargeter rather than at the
+        # socket so that every caller gets it: the live path, a replay, and the
+        # check scripts all measure the same pipeline. Pass
+        # FilterConfig(enabled=False) to A/B against the unfiltered input.
+        self.filter = LandmarkFilter(smoothing)
 
         # Scratch MjData for the IK solve — never the live sim's MjData,
         # since this mutates qpos directly without stepping physics.
@@ -150,10 +162,16 @@ class Retargeter:
         # Overwritten every solve; telemetry reads it instead of the solve
         # paths having to know how anything is formatted.
         self.last_solve = {side: ArmSolve(held=False) for side in ("left", "right")}
+        # The landmarks the last solve actually ran on — filtered, so not the
+        # ones that arrived on the wire. Telemetry logs these: a value that
+        # cannot be reconciled with the joints it produced is the thing worth
+        # noticing, and the raw landmark is not that value any more.
+        self.last_frame: PoseFrame | None = None
         # A client that sends no hips gives every frame a degenerate torso, and
         # a per-frame warning at 30fps would bury the log. Say it once.
         self._warned_no_torso = False
         logger.info("retargeting mode: %s", self.mode)
+        logger.info("%s", self.filter.config.describe())
 
     def _reset_pose(self) -> None:
         mujoco.mj_resetData(self.model, self.ik_data)
@@ -229,6 +247,11 @@ class Retargeter:
         return self.right.site_id
 
     def solve(self, frame: PoseFrame) -> np.ndarray:
+        # Smooth first, so that everything downstream — including the discrete
+        # branch choice in Stage12Solver, which no amount of joint-space
+        # filtering could undo — sees one consistent, de-jittered subject.
+        frame = self.filter.apply(frame)
+        self.last_frame = frame
         if self.mode == "sew":
             return self._solve_sew(frame)
         return self._solve_site_ik(frame)

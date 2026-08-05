@@ -172,7 +172,10 @@ async def pose_socket(websocket: WebSocket) -> None:
             started = time.perf_counter()
             state.qpos_target = state.retargeter.solve(frame)
             for line in telemetry.record(
-                frame,
+                # The smoothed landmarks, not the ones that just arrived: what
+                # is worth reading next to a joint value is the input that
+                # produced it.
+                state.retargeter.last_frame or frame,
                 state.retargeter.last_solve,
                 state.qpos_target,
                 state.sim.actuated_qpos(),
