@@ -17,12 +17,11 @@ install-frontend:
 backend:
     cd backend && uv run uvicorn app.main:app --reload --port 8000
 
-# Run the FastAPI backend with a live MuJoCo viewer window attached to the
-# real, shared sim — what you see is exactly what the websocket handlers are
-# driving. macOS needs this launched under mjpython, which in turn needs
-# DYLD_LIBRARY_PATH pointed at uv's managed Python's shared lib (without it
-# mjpython fails to even start). No --reload: the reloader's subprocess
-# model doesn't play well with owning a GUI window.
+# Run the FastAPI backend with a live MuJoCo viewer attached to the shared sim —
+# what you see is what the websocket handler is driving. macOS needs mjpython,
+# which needs DYLD_LIBRARY_PATH pointed at uv's managed Python's shared lib or it
+# won't start at all. No --reload: the reloader's subprocess model doesn't get on
+# with owning a GUI window.
 backend-viewer:
     cd backend && DYLD_LIBRARY_PATH="$(uv run python -c 'import sys; print(sys.base_prefix)')/lib" MUJOCO_VIEWER=1 uv run mjpython -m uvicorn app.main:app --port 8000
 
@@ -30,9 +29,9 @@ backend-viewer:
 frontend:
     cd frontend && npm run dev
 
-# Run backend (with viewer) + frontend together; Ctrl-C stops both. Then open
-# the printed frontend URL in your own browser (needs real webcam access) —
-# moving in frame should move the arm in the MuJoCo window.
+# Backend (with viewer) + frontend together; Ctrl-C stops both. Open the printed
+# frontend URL in a real browser — it needs webcam access — and moving in frame
+# should move the arm in the MuJoCo window.
 dev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -55,13 +54,24 @@ sim-check:
     print('target[0]:', target[0], 'reached:', round(sim.actuated_qpos()[0], 4)); \
     print('actuated qpos:', sim.actuated_qpos())"
 
-# Verify the retargeting pipeline (landmarks -> IK -> qpos_target) with synthetic input, no camera/GUI needed
-retarget-check:
-    cd backend && PYTHONPATH=. uv run python scripts/retarget_check.py
+# Check the closed-form SEW stage-1/2 derivation against MuJoCo forward kinematics
+sew-check:
+    cd backend && uv run python scripts/check_sew_closed_form.py
 
-# Open the native MuJoCo viewer on the bimanual model, disconnected from the backend (standalone sanity check)
+# Check the wired-up SEW path end-to-end: synthetic landmarks -> qpos_target
+sew-retarget-check:
+    cd backend && PYTHONPATH=. uv run python scripts/check_sew_retarget.py
+
+# Check the hand orientation frame (SEW stage-3 input) against its own properties
+hand-check:
+    cd backend && PYTHONPATH=. uv run python scripts/check_hand_frame.py
+
+# Run every check
+check: sim-check sew-check sew-retarget-check hand-check typecheck
+
+# Open the native MuJoCo viewer on the bimanual model, standalone (no backend)
 sim-view:
-    cd backend && uv run python -m mujoco.viewer --mjcf=../openarm_mujoco/v2/openarm_bimanual.xml
+    cd backend && uv run python -m mujoco.viewer --mjcf=assets/viewer_scene.xml
 
 # Type-check the frontend
 typecheck:
