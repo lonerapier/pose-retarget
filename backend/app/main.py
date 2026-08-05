@@ -10,19 +10,21 @@ landmarks) and stream state back.
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.control.position import PositionController
-from app.retarget.mapper import Landmark, PoseFrame
+from app.retarget.mapper import PoseFrame
 from app.retarget.retargeter import Retargeter
 from app.sim.simulator import Simulator
+from app.telemetry import PoseTelemetry
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    format="%(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -72,7 +74,7 @@ class SimState:
         if self.viewer is not None:
             self.viewer.sync()
         if self.tick_count % round(1 / self.tick_seconds) == 0:  # ~once a second
-            logger.info(
+            logger.debug(
                 "t=%.2fs qpos=%s",
                 self.sim.time,
                 [round(q, 3) for q in self.sim.actuated_qpos()],
@@ -142,10 +144,6 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-def _fmt(lm: Landmark) -> str:
-    return f"({lm.x:.3f}, {lm.y:.3f}, {lm.z:.3f})"
-
-
 async def _stream_state(websocket: WebSocket, state: SimState) -> None:
     while True:
         await websocket.send_json({
@@ -164,48 +162,48 @@ async def pose_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     logger.info("pose client connected: %s", websocket.client)
     state: SimState = websocket.app.state.sim_state
-    frame_count = 0
+    telemetry = PoseTelemetry(state.sim.actuator_names)
 
     sender = asyncio.create_task(_stream_state(websocket, state))
     try:
         while True:
             msg = await websocket.receive_json()
             frame = PoseFrame(**msg)
+            started = time.perf_counter()
             state.qpos_target = state.retargeter.solve(frame)
-            frame_count += 1
-            if frame_count % 30 == 0:  # ~once/sec at 30fps
-                logger.info(
-                    "pose frame %d: L wrist=%s R wrist=%s qpos_target=%s",
-                    frame_count,
-                    _fmt(frame.left_wrist),
-                    _fmt(frame.right_wrist),
-                    [round(q, 3) for q in state.qpos_target],
-                )
+            for line in telemetry.record(
+                frame,
+                state.retargeter.last_solve,
+                state.qpos_target,
+                state.sim.actuated_qpos(),
+                time.perf_counter() - started,
+            ):
+                logger.info("%s", line)
     except WebSocketDisconnect:
         logger.info("pose client disconnected: %s", websocket.client)
     finally:
         sender.cancel()
 
 
-@app.websocket("/ws/sim")
-async def sim_socket(websocket: WebSocket) -> None:
-    """Accepts raw joint targets directly (bypassing retargeting) — useful
-    for manual testing against the same shared sim."""
-    await websocket.accept()
-    logger.info("client connected: %s", websocket.client)
-    state: SimState = websocket.app.state.sim_state
+# @app.websocket("/ws/sim")
+# async def sim_socket(websocket: WebSocket) -> None:
+#     """Accepts raw joint targets directly (bypassing retargeting) — useful
+#     for manual testing against the same shared sim."""
+#     await websocket.accept()
+#     logger.info("client connected: %s", websocket.client)
+#     state: SimState = websocket.app.state.sim_state
 
-    sender = asyncio.create_task(_stream_state(websocket, state))
-    try:
-        while True:
-            msg = await websocket.receive_json()
-            if "qpos_target" in msg:
-                target = state.qpos_target.copy()
-                for i, v in enumerate(msg["qpos_target"][: state.sim.model.nu]):
-                    target[i] = v
-                state.qpos_target = target
-                logger.info("received qpos_target: %s", target)
-    except WebSocketDisconnect:
-        logger.info("client disconnected: %s", websocket.client)
-    finally:
-        sender.cancel()
+#     sender = asyncio.create_task(_stream_state(websocket, state))
+#     try:
+#         while True:
+#             msg = await websocket.receive_json()
+#             if "qpos_target" in msg:
+#                 target = state.qpos_target.copy()
+#                 for i, v in enumerate(msg["qpos_target"][: state.sim.model.nu]):
+#                     target[i] = v
+#                 state.qpos_target = target
+#                 logger.info("received qpos_target: %s", target)
+#     except WebSocketDisconnect:
+#         logger.info("client disconnected: %s", websocket.client)
+#     finally:
+#         sender.cancel()

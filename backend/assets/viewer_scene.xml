@@ -1,0 +1,28 @@
+<!--
+Viewer scene for the bimanual arms.
+
+The arms are matte black and the default MuJoCo background is near-black, so the
+bare openarm_bimanual.xml is very hard to read in the viewer. This wrapper leaves
+that model untouched (it lives in the openarm_mujoco submodule) and just attaches
+it into a lit scene: pale skybox gradient behind the dark arms, brighter headlight
+plus one directional key light so the links separate from each other.
+
+Nothing here touches dynamics -- no floor, no extra bodies, no contacts -- so the
+compiled model has the same nq/nv/nu and the same body/joint/actuator/site names
+as the raw model. `prefix=""` on the attach is what keeps those names identical.
+-->
+<mujoco model="openarm_bimanual_viewer">
+  <compiler meshdir="../../openarm_mujoco/v2/assets" angle="radian"/>
+  <visual>
+    <headlight diffuse="0.75 0.75 0.75" ambient="0.45 0.45 0.45" specular="0.2 0.2 0.2"/>
+    <global azimuth="150" elevation="-20"/>
+  </visual>
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.95 0.96 0.98" rgb2="0.75 0.78 0.84" width="512" height="3072"/>
+    <model name="arms" file="../../openarm_mujoco/v2/openarm_bimanual.xml"/>
+  </asset>
+  <worldbody>
+    <light pos="0.6 0.6 1.5" dir="-0.4 -0.4 -1" directional="true" diffuse="0.5 0.5 0.5"/>
+    <attach model="arms" prefix=""/>
+  </worldbody>
+</mujoco>
