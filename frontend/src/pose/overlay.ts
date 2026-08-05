@@ -30,8 +30,7 @@ export class PoseOverlay {
       this.drawing.drawLandmarks(landmarks, { radius: 3 })
       this.drawing.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS)
     }
-    // Hands in a different colour: overlapping the pose skeleton's own wrist,
-    // they are otherwise impossible to tell apart at a glance.
+    // Hands in a different colour, they overlap the pose skeleton's own wrist.
     for (const landmarks of hands?.landmarks ?? []) {
       this.drawing.drawLandmarks(landmarks, { radius: 2, color: '#ff9f43' })
       this.drawing.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {

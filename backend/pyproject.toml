@@ -1,11 +1,10 @@
 [project]
 name = "bim-backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "Webcam pose retargeting to a bimanual OpenArm in MuJoCo"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
-    "mediapy>=1.2.7",
     "mujoco>=3.6.0",
     "numpy>=2.5.1",
     "scipy>=1.18.0",
@@ -17,15 +16,10 @@ dependencies = [
 line-length = 88
 
 [tool.ruff.lint]
-# Enable standard linting rules
 select = ["E", "F", "W", "I"]
-# Set the indent width for linting as well
-# This is used by some linting rules that care about indentation.
 
 [tool.ruff.format]
-# Use spaces for indentation
 indent-style = "space"
-# Use double quotes for strings
 quote-style = "double"
 
 [dependency-groups]

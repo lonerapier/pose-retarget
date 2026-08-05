@@ -4,8 +4,8 @@ import {
   type PoseLandmarkerResult,
 } from '@mediapipe/tasks-vision'
 
-/** `timestamp` is the one handed to MediaPipe, so a second model can be run
- * against the same video frame without the two drifting apart. */
+/** `timestamp` is the one given to MediaPipe, so a second model can run against
+ * the same video frame without the two drifting apart. */
 export type PoseCallback = (result: PoseLandmarkerResult, timestamp: number) => void
 
 /** Runs MediaPipe PoseLandmarker in-browser (WASM/GPU) against a live webcam stream. */
@@ -19,9 +19,9 @@ export class PoseTracker {
   }
 
   async init(): Promise<void> {
-    // Served from public/, copied out of node_modules by `npm run sync-wasm`. The WASM
-    // build must match the installed @mediapipe/tasks-vision exactly — pulling it from
-    // a CDN's `@latest` drifts and blows up with `ASM_CONSTS[code] is not a function`.
+    // Served from public/, copied out of node_modules by `npm run sync-wasm`. The
+    // WASM build has to match the installed @mediapipe/tasks-vision exactly because
+    // a CDN's `@latest` drifts and dies with `ASM_CONSTS[code] is not a function`.
     const vision = await FilesetResolver.forVisionTasks('/mediapipe/wasm')
     this.landmarker = await PoseLandmarker.createFromOptions(vision, {
       baseOptions: {
