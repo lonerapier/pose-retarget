@@ -23,13 +23,11 @@ def damped_least_squares_step(
 
 
 def _clamp_to_joint_limits(model: mujoco.MjModel, data: mujoco.MjData) -> None:
-    """Clip qpos to each joint's declared range in place.
+    """Clip qpos to each joint's declared range, in place.
 
-    Without this, an unconstrained least-squares step can walk a joint past
-    its physical limit (e.g. an elbow bending the "wrong" way) to satisfy the
-    site target. That doesn't just look wrong — it can land the arm in a
-    configuration where the Jacobian is close to singular, at which point the
-    solver stops making progress at all (see the elbow example this caught).
+    Without it an unconstrained least-squares step will walk a joint past its
+    physical limit to satisfy the site target. That isn't only ugly: it can land
+    the arm near a singular Jacobian.
     """
     for joint_id in range(model.njnt):
         if not model.jnt_limited[joint_id]:
@@ -48,14 +46,11 @@ def solve_site_ik(
     tol: float = 1e-4,
     damping: float = 0.05,
 ) -> None:
-    """Repeatedly apply damped_least_squares_step until the site is within
-    `tol` meters of target_pos, or max_iters is reached. A single step is only
-    a linear approximation (it uses the Jacobian at the current pose), so it
-    needs to be iterated to actually converge for anything but a tiny move.
+    """Step until the site is within `tol` metres of target_pos, or max_iters
+    runs out.
 
-    Mutates `data.qpos` in place. `data` should be a scratch MjData used only
-    for this kinematic solve — never the live simulation's MjData, since this
-    writes qpos directly without going through torque/mj_step at all.
+    Mutates `data.qpos` in place, so `data` must be scratch MjData and never the
+    live sim's, since this writes qpos without going through mj_step.
     """
     for _ in range(max_iters):
         mujoco.mj_forward(model, data)

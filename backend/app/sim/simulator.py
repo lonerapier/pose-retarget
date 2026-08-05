@@ -6,13 +6,10 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-# Thin wrapper around openarm_mujoco/v2/openarm_bimanual.xml (a submodule, so we
-# don't edit it in place) that attaches the arms unchanged into a lit scene with
-# a pale skybox — the bare model renders near-black arms on a black background.
-# Bodies, joints, actuators and sites all keep their original names.
-MODEL_PATH = (
-    Path(__file__).resolve().parents[2] / "assets" / "viewer_scene.xml"
-)
+# Thin wrapper around openarm_mujoco/v2/openarm_bimanual.xml. It attaches the
+# arms unchanged into a lit scene with a pale skybox, since the bare model
+# renders near-black arms on a black background.
+MODEL_PATH = Path(__file__).resolve().parents[2] / "assets" / "viewer_scene.xml"
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +21,9 @@ class Simulator:
         self.data = mujoco.MjData(self.model)
         mujoco.mj_resetData(self.model, self.data)
 
-        # Actuators don't map 1:1 onto the first N joints (e.g. each gripper has
-        # two finger joints but only one actuator), so resolve the real
-        # qpos/dof address of the joint each actuator drives.
+        # Actuators don't map 1:1 onto the first N joints. Each gripper has two
+        # finger joints and one actuator.
+        # Resolve the qpos/dof address of the joint each actuator actually drives.
         joint_ids = self.model.actuator_trnid[:, 0]
         self.actuator_qposadr = self.model.jnt_qposadr[joint_ids]
         self.actuator_dofadr = self.model.jnt_dofadr[joint_ids]
@@ -51,9 +48,8 @@ class Simulator:
         return self.data.qvel[self.actuator_dofadr].copy()
 
     def step(self, ctrl: np.ndarray) -> None:
-        """Advance one timestep. Every actuator in this model is a `<position>`
-        actuator, so `ctrl` is a vector of target joint angles in radians (see
-        PositionController), not torques."""
+        """Advance one timestep. Every actuator here is a `<position>` actuator,
+        so `ctrl` is target joint angles in radians, not torques."""
         self.data.ctrl[:] = ctrl
         mujoco.mj_step(self.model, self.data)
         logger.debug(

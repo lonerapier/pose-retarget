@@ -1,16 +1,9 @@
-"""Combines landmark->target mapping and IK: given one PoseFrame, produce a
-qpos_target (actuator-space) for the position servos to drive toward.
+"""Converts PoseFrame to Actuator space.
 
-Two retargeting paths live here, chosen by `mode`:
-
-- "sew"  (default) closed-form SEW-Mimic stages 1-2, NEXT_STEPS §0.2. Matches
-         the human's *limb orientations*; joints 1-4 are solved exactly and
-         joints 5-7 hold their neutral posture (stage 3 is not built yet).
-- "ik"   the original position-only damped-least-squares solve on the ee site.
-         Kept for A/B comparison against the battery — it is the thing §0 is
-         arguing against, and the argument is worth being able to demonstrate.
-
-Set RETARGET_MODE=ik to select the old path.
+Two paths live here, chosen by `mode`:
+- "sew": (default) closed-form SEW-Mimic stages 1-2. Matches the human's *limb
+orientations*.
+- "ik": position-only damped least squares on the ee site.
 """
 
 import logging
@@ -27,39 +20,38 @@ from app.sim.simulator import Simulator
 
 logger = logging.getLogger(__name__)
 
-# Retargeting paths, in the order of preference argued for in NEXT_STEPS §0.
 MODES = ("sew", "ik")
 DEFAULT_MODE = "sew"
 
-# Number of elbow angles sampled when measuring each arm's reach.
+# Elbow angles sampled when measuring each arm's reach.
 _REACH_SAMPLES = 64
 
 # Cap on the commanded radius, as a fraction of max reach. At full extension the
-# arm is straight, which is exactly where the IK Jacobian goes singular and
-# damped least-squares starts amplifying landmark noise into large joint swings.
-# Staying slightly folded keeps the elbow able to contribute.
+# arm is straight, which is where the IK Jacobian goes singular and damped least
+# squares starts turning landmark noise into large joint swings. Staying
+# slightly folded keeps the elbow able to contribute.
 MAX_EXTENSION = 0.95
 
-# Direction used when the hand is so close to the shoulder that the
-# shoulder->wrist direction is numerically meaningless.
+# Below this the hand is so close to the shoulder that the shoulder->wrist
+# direction means nothing.
 _MIN_DIRECTION = 1e-6
 
 
 @dataclass
 class ArmSolve:
-    """What one arm's retarget did on one frame, for telemetry.
+    """Retargeting result for an arm.
 
-    Kept as a record of the last solve rather than logged from inside the solve
-    itself: the interesting line is landmarks *and* joints together, and only
-    the caller has both. All fields are None on a held frame except `held`.
+    Recorded rather than logged from inside the solve: the interesting line is
+    landmarks *and* joints together, and only the caller has both. Everything
+    but `held` is None on a held frame.
     """
 
     held: bool  # limb directions were degenerate; the arm kept its last pose
-    upper_arm: np.ndarray | None = None  # human u, in this arm's base frame
-    forearm: np.ndarray | None = None  # human l, same frame
-    q: np.ndarray | None = None  # solved joints 1-4
+    upper_arm: np.ndarray | None = None  # upper arm vector, in this arm's base frame
+    forearm: np.ndarray | None = None  # forearm vector, same frame
+    q: np.ndarray | None = None  # joint angles 1-4
     clamped: np.ndarray | None = None  # per-joint: solve landed outside limits
-    ee: np.ndarray | None = None  # resulting control point, world frame
+    ee: np.ndarray | None = None  # control point in world frame
 
 
 @dataclass
@@ -67,22 +59,19 @@ class ArmGeometry:
     """Where one arm's workspace sits, measured off the model at startup.
 
     The workspace is a spherical *shell*, not a ball: the links have length, so
-    the control point can no more fold back onto the shoulder than a person can
-    touch their own shoulder with their wrist. On this model that inner radius
-    is 0.16m against a 0.44m outer radius — a third of full reach — so a folded
-    human arm has no exact robot equivalent and has to be clamped outward.
+    the control point can no more fold onto the shoulder than a person can touch
+    their own shoulder with their wrist.
 
-    Everything below `stage12_range` is used by the position path only. The SEW path
-    consumes just the base rotation (to express the human's limb directions in
-    the frame the closed form is derived in) and the stage-1/2 joint addresses:
-    it never targets a position, so reach cannot fail and nothing needs to be
-    clamped into a shell.
+    Everything below `stage12_range` belongs to the position path. The SEW path
+    uses only the base rotation (to express the human's limb directions in the
+    frame the closed form is derived in) and the stage-1/2 joint addresses; it
+    never targets a position, so reach can't fail.
     """
 
     site_id: int
     base_R: np.ndarray  # arm base frame in world axes, columns are its axes
     stage12_qposadr: np.ndarray  # qpos addresses of joints 1-4, in order
-    stage12_range: np.ndarray  # (4, 2) joint limits for those same joints
+    stage12_range: np.ndarray  # joint limits, shape (4, 2)
     shoulder: np.ndarray  # world position of the first shoulder joint's axis
     min_reach: float  # inner radius of the reachable shell
     max_reach: float  # outer radius, arm straight
@@ -91,10 +80,10 @@ class ArmGeometry:
     def target(self, extension: np.ndarray) -> np.ndarray:
         """Map a unitless arm-extension vector into a world-frame IK target.
 
-        Direction is taken from the human pose and preserved exactly; only the
-        radius is rescaled into the robot's reachable shell. Clamping the radius
-        rather than the whole vector means an out-of-range hand still points the
-        robot the right way instead of collapsing toward the shoulder.
+        Direction comes from the human pose and is preserved exactly; only the
+        radius is rescaled into the reachable shell. Clamping the radius rather
+        than the whole vector means an out-of-range hand still points the robot
+        the right way instead of collapsing toward the shoulder.
         """
         distance = float(np.linalg.norm(extension))
         if distance < _MIN_DIRECTION:
@@ -116,8 +105,8 @@ class Retargeter:
         if self.mode not in MODES:
             raise ValueError(f"unknown retarget mode {self.mode!r}, expected {MODES}")
 
-        # Scratch MjData for the IK solve — never the live sim's MjData,
-        # since this mutates qpos directly without stepping physics.
+        # Scratch MjData, never the live sim's: this writes qpos directly
+        # without stepping physics.
         self.ik_data = mujoco.MjData(self.model)
         self._reset_pose()
 
@@ -132,10 +121,10 @@ class Retargeter:
                 arm.max_reach,
             )
 
-        # _measure_arm left qpos wherever the reach scan ended; put it back at
-        # the neutral pose so the first solve warm-starts from something sane.
-        # In "sew" mode this is also what leaves joints 5-7 at neutral, which
-        # is where they stay — nothing writes them until stage 3 exists.
+        # _measure_arm left qpos wherever the reach scan ended; put it back to
+        # neutral so the first solve warm-starts from something sane. In "sew"
+        # mode this is also what leaves joints 5-7 at neutral, where they stay
+        # until stage 3 exists.
         self._reset_pose()
 
         self.stage12 = {
@@ -147,11 +136,11 @@ class Retargeter:
             )
             for side, arm in (("left", self.left), ("right", self.right))
         }
-        # Overwritten every solve; telemetry reads it instead of the solve
-        # paths having to know how anything is formatted.
+        # Overwritten every solve; telemetry reads this so the solve paths don't
+        # have to know how anything is formatted.
         self.last_solve = {side: ArmSolve(held=False) for side in ("left", "right")}
-        # A client that sends no hips gives every frame a degenerate torso, and
-        # a per-frame warning at 30fps would bury the log. Say it once.
+        # A client sending no hips gives every frame a degenerate torso, and a
+        # per-frame warning at 30fps would bury the log. Say it once.
         self._warned_no_torso = False
         logger.info("retargeting mode: %s", self.mode)
 
@@ -168,19 +157,17 @@ class Retargeter:
     def _measure_arm(self, side: str) -> ArmGeometry:
         """Locate one arm's shoulder and measure how far it can reach.
 
-        The shoulder is the world anchor of joint1, the first joint in the
-        chain — the point the whole arm pivots about, and the natural origin
-        for a human shoulder->wrist vector. Note this is NOT the resting
-        end-effector position: at qpos0 the arm hangs straight down, a full
-        arm-length below the shoulder, so anchoring there would put the neutral
-        pose on the edge of the workspace and make every downward hand motion
-        unreachable.
+        The shoulder is joint1's world anchor — the point the whole arm pivots
+        about, and the natural origin for a human shoulder->wrist vector. Not
+        the resting end-effector position: at qpos0 the arm hangs straight down
+        a full arm-length below the shoulder, so anchoring there would put the
+        neutral pose on the edge of the workspace and make every downward hand
+        motion unreachable.
 
-        Both radii are measured rather than assumed: sweep the elbow across its
-        range with the rest of the arm at qpos0 and record how far the control
-        point gets from the shoulder. Straight-armed is the maximum and fully
-        folded the minimum, but sweeping keeps this correct if qpos0 or the
-        joint ranges change.
+        Both radii are measured, not assumed: sweep the elbow across its range
+        with the rest of the arm at qpos0 and record how far the control point
+        gets from the shoulder. Straight-armed is the maximum and fully folded
+        the minimum, but sweeping stays correct if qpos0 or the ranges change.
         """
         site_id = self._id(mujoco.mjtObj.mjOBJ_SITE, f"{side}_ee_control_point")
         shoulder_joint = self._id(mujoco.mjtObj.mjOBJ_JOINT, f"openarm_{side}_joint1")
@@ -192,8 +179,7 @@ class Retargeter:
         ]
 
         self._reset_pose()
-        # The base link is welded to the torso, so its orientation is fixed and
-        # reading it once at startup is enough.
+        # base link is fixed relative to the torso
         base_R = self.ik_data.xmat[base_body].reshape(3, 3).copy()
         shoulder = self.ik_data.xanchor[shoulder_joint].copy()
         rest_offset = self.ik_data.site_xpos[site_id] - shoulder
@@ -234,19 +220,18 @@ class Retargeter:
         return self._solve_site_ik(frame)
 
     def _solve_sew(self, frame: PoseFrame) -> np.ndarray:
-        """Closed-form SEW-Mimic stages 1-2 (NEXT_STEPS §0.2).
+        """Closed-form SEW-Mimic stages 1-2.
 
         Per arm: read the human's two limb directions, express them in that
-        arm's base frame, and solve joints 1-4 in one shot. Joints 5-7 are left
-        wherever they are — at neutral, since nothing writes them — because
-        stage 3 needs a wrist orientation target we have measured
-        (`mapper.hand_orientation`) but do not yet consume.
+        arm's base frame, solve joints 1-4 analytically.
 
-        Unlike the position path this does no iterating and keeps no null space
-        to drift, so a lost or degenerate landmark can simply be skipped: the
-        arm holds its last pose and picks straight back up on the next good
-        frame, with no accumulated error to unwind.
+        No iteration and no null space to drift, so a lost or degenerate
+        landmark can just be skipped: the arm holds its last pose and picks back
+        up on the next good frame with no accumulated error to unwind.
         """
+        # TODO: Joints 5-7 stay at neutral since nothing writes them. stage 3 needs a
+        # wrist orientation target that `mapper.hand_orientation` measures.
+
         torso = torso_frame(frame)
         if torso is None and not self._warned_no_torso:
             self._warned_no_torso = True
@@ -270,22 +255,21 @@ class Retargeter:
             solver = self.stage12[side]
             # Two frame changes, composed once per arm per frame.
             #
-            #   torso.T    camera axes -> the subject's own torso frame. Makes
-            #              the input body-centric, so leaning or turning moves
-            #              nothing (§6.2, and §7.3's prerequisite).
-            #   base_R.T   robot world axes -> this arm's base frame, which is
-            #              the frame sew.py's closed form is derived in.
+            # - torso.T: camera axes -> the subject's own torso frame, so
+            # leaning or turning moves nothing.
+            # - base_R.T: robot world axes -> this arm's base frame, which is
+            # where sew.py's closed form is derived.
             #
-            # The step between them is the retargeting itself and needs no
+            # The step between them is the retargeting itself, and it needs no
             # matrix: a direction in the human's torso frame is *taken to be*
-            # the same direction in the robot's torso frame. That identification
-            # is the whole of what "mimic" means here, and it is why link
-            # lengths and the shoulder offset never enter.
+            # the same direction in the robot's.
             to_arm_base = arm.base_R.T if torso is None else arm.base_R.T @ torso.T
             upper_arm = to_arm_base @ directions[0]
             forearm = to_arm_base @ directions[1]
             q = solver.solve(upper_arm, forearm)
             self.ik_data.qpos[arm.stage12_qposadr] = q
+
+            # Log metrics
             self.last_solve[side] = ArmSolve(
                 held=False,
                 upper_arm=upper_arm,
@@ -294,9 +278,8 @@ class Retargeter:
                 clamped=solver.last_clamped.copy(),
             )
 
-        # Not needed to build the command — this writes qpos directly — but it
-        # keeps ik_data's derived quantities consistent with its qpos, so the
-        # site positions stay meaningful for logging and for metrics (§6.4).
+        # Not needed to build the command (qpos is written directly)
+        # Mainly done to get control plane values for logging.
         mujoco.mj_forward(self.model, self.ik_data)
         for side, arm in (("left", self.left), ("right", self.right)):
             self.last_solve[side].ee = self.ik_data.site_xpos[arm.site_id].copy()
@@ -312,13 +295,13 @@ class Retargeter:
 
         # ik_data.qpos is left over from the previous call, so this warm-starts:
         # consecutive frames converge in ~1 iteration and stay near the previous
-        # pose instead of jumping between valid configurations (position-only
-        # IK is under-constrained — see the redundancy note from earlier).
+        # pose instead of hopping between valid configurations. Position-only IK
+        # on a 7-DoF arm is under-constrained, so there are plenty to hop to.
         solve_site_ik(self.model, self.ik_data, self.left.site_id, left_target)
         solve_site_ik(self.model, self.ik_data, self.right.site_id, right_target)
 
-        # This path has no limb directions or stage-1/2 branch to report; the ee
-        # site is the one field that means the same thing in both modes.
+        # No limb directions or branch to report here; the ee site is the one
+        # field that means the same thing in both modes.
         for side, arm in (("left", self.left), ("right", self.right)):
             self.last_solve[side] = ArmSolve(
                 held=False, ee=self.ik_data.site_xpos[arm.site_id].copy()

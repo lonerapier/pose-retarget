@@ -1,10 +1,10 @@
-"""FastAPI app: one shared Simulator drives everything (not one per
-websocket connection), so that a single live MuJoCo viewer window — see
-MUJOCO_VIEWER / `just backend-viewer` — can mirror exactly what the
-websocket handlers below are doing to it. A background task steps physics
-at 60Hz regardless of whether anyone's connected; websocket handlers just
-update `qpos_target` (from raw joint values or from retargeted pose
-landmarks) and stream state back.
+"""FastAPI app. One shared Simulator drives everything rather than one per
+websocket connection, so a single live MuJoCo viewer window (MUJOCO_VIEWER=1,
+or `just backend-viewer`) mirrors exactly what the handlers are doing to it.
+
+A background task steps physics at 60Hz whether or not anyone is connected;
+the websocket handler just updates `qpos_target` from retargeted landmarks and
+streams state back.
 """
 
 import asyncio
@@ -29,9 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-TARGET_TICK_SECONDS = (
-    1 / 60
-)  # desired physics tick period, rounded to a whole substep count
+TARGET_TICK_SECONDS = 1 / 60  # rounded to a whole substep count below
 MAX_CATCHUP_TICKS = 3  # how much backlog the physics loop will try to repay
 
 
@@ -44,15 +42,14 @@ class SimState:
         self.viewer = None
         self.tick_count = 0
 
-        # The model's timestep (2ms) is much shorter than a 60Hz tick, so one
-        # mj_step per tick would run the sim at 0.12x realtime — the arm could
+        # The model's 2ms timestep is much shorter than a 60Hz tick, so one
+        # mj_step per tick would run the sim at 0.12x realtime and the arm could
         # never catch a live pose. Step enough substeps to cover a whole tick.
         #
-        # The tick period is then derived *back* from the substep count rather
-        # than being pinned at 1/60: 1/60 isn't a whole number of 2ms steps, so
-        # sleeping 1/60 while stepping 8x2ms would leave the sim permanently
-        # 3.6% slow. Deriving it keeps sim time and wall time exactly in step,
-        # at the cost of ticking at 62.5Hz instead of 60Hz.
+        # The tick period is then derived back from the substep count instead of
+        # being pinned at 1/60, which isn't a whole number of 2ms steps: sleeping
+        # 1/60 while stepping 8x2ms leaves the sim permanently 3.6% slow.
+        # Deriving it keeps sim and wall time in step, at 62.5Hz not 60Hz.
         timestep = self.sim.model.opt.timestep
         self.substeps = max(1, round(TARGET_TICK_SECONDS / timestep))
         self.tick_seconds = self.substeps * timestep
@@ -65,8 +62,8 @@ class SimState:
         )
 
     def step(self) -> None:
-        # Read qpos_target once per tick: a websocket handler can replace it
-        # between substeps, and every substep of a tick should track one target.
+        # Read qpos_target once per tick: the websocket handler can replace it
+        # between substeps, and every substep should track one target.
         ctrl = self.controller.ctrl(self.qpos_target)
         for _ in range(self.substeps):
             self.sim.step(ctrl)
@@ -84,16 +81,12 @@ class SimState:
 async def _physics_loop(state: SimState) -> None:
     """Steps the sim on a fixed wall-clock cadence.
 
-    Sleeping a flat tick_seconds would add both the stepping time and the event
-    loop's timer granularity (~1ms per sleep on macOS) to every period, so the
-    sim would run persistently slow — measurably ~0.9x. Track an absolute
-    deadline and sleep only the remainder, which lets a short tick make up for
-    the previous long one.
+    Sleeping a flat tick_seconds adds the stepping time and the event loop's
+    timer granularity (~1ms per sleep on macOS) to every period, which measured
+    at ~0.9x realtime. Tracking an absolute deadline and sleeping only the
+    remainder lets a short tick make up for the previous long one.
 
-    Catch-up is capped at MAX_CATCHUP_TICKS of backlog: a genuine stall (a slow
-    IK solve hogging the loop, a laptop suspending) should be absorbed and
-    forgotten, not repaid as a burst of hundreds of steps that would make the
-    arm lurch.
+    Catch-up is capped at MAX_CATCHUP_TICKS, drop the events between the lag.
     """
     loop = asyncio.get_running_loop()
     next_tick = loop.time()
@@ -129,8 +122,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Frontend (Vite, e.g. localhost:5173) and backend (localhost:8000) are
-# different origins in dev.
+# Vite (localhost:5173) and the backend (localhost:8000) are different origins
+# in dev.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -155,9 +148,9 @@ async def _stream_state(websocket: WebSocket, state: SimState) -> None:
 
 @app.websocket("/ws/pose")
 async def pose_socket(websocket: WebSocket) -> None:
-    """Drives the shared sim from live webcam landmarks: each incoming
-    PoseFrame is retargeted to a qpos_target via IK, which the shared
-    PD+gravity loop tracks. Streams sim state back, same schema as /ws/sim.
+    """Drives the shared sim from live webcam landmarks. Each incoming PoseFrame
+    is retargeted to a qpos_target for the position servos to track; sim state
+    streams back on the same socket.
     """
     await websocket.accept()
     logger.info("pose client connected: %s", websocket.client)
@@ -183,27 +176,3 @@ async def pose_socket(websocket: WebSocket) -> None:
         logger.info("pose client disconnected: %s", websocket.client)
     finally:
         sender.cancel()
-
-
-# @app.websocket("/ws/sim")
-# async def sim_socket(websocket: WebSocket) -> None:
-#     """Accepts raw joint targets directly (bypassing retargeting) — useful
-#     for manual testing against the same shared sim."""
-#     await websocket.accept()
-#     logger.info("client connected: %s", websocket.client)
-#     state: SimState = websocket.app.state.sim_state
-
-#     sender = asyncio.create_task(_stream_state(websocket, state))
-#     try:
-#         while True:
-#             msg = await websocket.receive_json()
-#             if "qpos_target" in msg:
-#                 target = state.qpos_target.copy()
-#                 for i, v in enumerate(msg["qpos_target"][: state.sim.model.nu]):
-#                     target[i] = v
-#                 state.qpos_target = target
-#                 logger.info("received qpos_target: %s", target)
-#     except WebSocketDisconnect:
-#         logger.info("client disconnected: %s", websocket.client)
-#     finally:
-#         sender.cancel()

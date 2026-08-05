@@ -1,11 +1,10 @@
-"""Per-frame telemetry for the pose->IK path.
+"""Per-frame telemetry for the pose->joints path.
 
-Same information the old `qpos=[...16 floats...]` line carried, but split per
-arm and labelled with what each group of numbers is, so a value can be placed
-at a glance while debugging live. Joint values stay as plain lists in actuator
-order (joints 1-7 then the gripper).
+Everything the old `qpos=[...16 floats...]` line carried, split per arm and
+labelled, so a value can be placed at a glance while debugging live. Joint
+values stay as plain lists in actuator order (joints 1-7 then the gripper).
 
-Backend only, by design: the browser gets no extra payload from this.
+Backend only: the browser gets no extra payload from this.
 """
 
 import os
@@ -16,8 +15,7 @@ import numpy as np
 from app.retarget.mapper import Landmark, PoseFrame
 from app.retarget.retargeter import ArmSolve
 
-# Seconds between reports. One per second is readable while scrolling live;
-# set to 0 to log every frame.
+# Seconds between reports. One a second stays readable live; 0 logs every frame.
 LOG_INTERVAL = float(os.environ.get("POSE_LOG_INTERVAL", "1.0"))
 
 
@@ -38,14 +36,14 @@ def _fmt_list(values: np.ndarray) -> str:
 class PoseTelemetry:
     """Renders one frame's pose->joint state as a few named log lines.
 
-    Frames are counted every call but only rendered every LOG_INTERVAL, so the
+    Every frame is counted but only one per LOG_INTERVAL is rendered, so the
     frame number and fps stay honest even though most frames aren't printed.
     """
 
     def __init__(self, actuator_names: list[str | None]) -> None:
-        # Actuator order is left arm then right arm on this model, but group by
-        # name rather than by slicing so an added actuator can't silently move
-        # values into the wrong arm's list.
+        # Actuator order is left arm then right arm here, but group by name
+        # rather than by slicing so an added actuator can't quietly shift values
+        # into the wrong arm's list.
         self.groups: dict[str, list[int]] = {"left": [], "right": [], "other": []}
         for i, name in enumerate(actuator_names):
             name = name or f"act{i}"
@@ -91,9 +89,9 @@ class PoseTelemetry:
             f"frame {self.frame_count} fps={fps:.1f} "
             f"retarget={1e3 * solve_seconds:.2f}ms"
         )
-        # t_capture is browser wall clock and this is server wall clock, so on
-        # separate machines the lag includes clock skew. Same machine, it is the
-        # real camera->solve latency.
+        # t_capture is browser wall clock against server wall clock, so across
+        # machines this includes clock skew. On one machine it's the real
+        # camera->solve latency.
         if frame.t_capture is not None:
             head += f" capture_lag={1e3 * (time.time() - frame.t_capture):.1f}ms"
 
@@ -109,17 +107,16 @@ class PoseTelemetry:
             solve = solves.get(side)
             if solve is not None:
                 held = " HELD (degenerate landmarks)" if solve.held else ""
-                # The two unit vectors the SEW closed form actually solves
-                # joints 1-4 from (the human's limb directions, in this arm's
-                # base frame), and the control point they put the arm's hand at.
+                # The two unit vectors joints 1-4 are actually solved from, plus
+                # the control point they end up putting the hand at.
                 lines.append(
                     f"{side} limbs: upper_arm={_fmt_vec(solve.upper_arm)} "
                     f"forearm={_fmt_vec(solve.forearm)} "
                     f"ee_pos={_fmt_vec(solve.ee)}{held}"
                 )
-                # Which joints the human asked past the arm's limits — invisible
-                # in the joint values themselves, since a clamped joint just
-                # reads as sitting exactly on its limit.
+                # Which joints the human asked past the arm's limits. Invisible
+                # in the joint values themselves — a clamped joint just reads as
+                # sitting exactly on its limit.
                 if solve.clamped is not None and solve.clamped.any():
                     hit = [str(i + 1) for i, c in enumerate(solve.clamped) if c]
                     lines.append(f"{side} clamped joints: {', '.join(hit)}")
