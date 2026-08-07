@@ -34,6 +34,16 @@ flowchart TD
         MP["MediaPipe Pose + Hands"]
         WL["World landmarks (30fps)"]
         MP --> WL
+
+        subgraph View ["Demo view (demo.html)"]
+            direction TB
+            SK["Skeleton3D
+            World landmarks, perspective"]
+            CANVAS["1280x720 canvas
+            sim + skeleton + HUD"]
+            REC["MediaRecorder ➔ .webm"]
+            SK --> CANVAS --> REC
+        end
     end
 
     subgraph Backend ["Backend (FastAPI, MuJoCo)"]
@@ -60,13 +70,25 @@ flowchart TD
         end
 
         SIM["sim.step()"]
+        TEL["PoseTelemetry
+        record() ➔ log_lines() + hud_payload()"]
+        REN["SimRenderer
+        Offscreen render ➔ JPEG, own thread"]
     end
 
     WL -- "WebSocket /ws/pose" --> PF
+    WL --> SK
     ARM --> TF
     HIPS --> TF
     CTRL --> SIM
+    SOLVER -- "ArmSolve (margin, clamped)" --> TEL
+    SIM --> REN
+    SIM -- "qpos" --> TEL
+    TEL -- "state + hud on /ws/pose" --> CANVAS
+    REN -- "WebSocket /ws/sim" --> CANVAS
 ```
+
+The pose path is the same either way; the demo view adds a second read of the *same* sim. `SimRenderer` runs on its own thread and only while a `/ws/sim` client is connected, and `PoseTelemetry` takes each frame once and renders it twice — to the backend log, and to the HUD payload that rides back on `/ws/pose`.
 
 ### Running
 

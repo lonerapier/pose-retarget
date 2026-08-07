@@ -22,7 +22,7 @@ from app.retarget.mapper import PoseFrame
 from app.retarget.retargeter import Retargeter
 from app.sim.renderer import SimRenderer
 from app.sim.simulator import Simulator
-from app.telemetry import HudMeter, PoseTelemetry
+from app.telemetry import PoseTelemetry
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -47,10 +47,6 @@ class SimState:
         # renderer takes it today; the physics loop holds it while stepping.
         self.data_lock = threading.Lock()
         self.renderer = SimRenderer(self.sim, self.data_lock)
-        # Last frame's HUD numbers. Lives on the shared state rather than
-        # per-connection because the demo page's two sockets are separate
-        # connections: pose goes in on one, sim frames come back on the other.
-        self.hud = HudMeter()
 
         # The model's 2ms timestep is much shorter than a 60Hz tick, so one
         # mj_step per tick would run the sim at 0.12x realtime and the arm could
@@ -149,13 +145,21 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-async def _stream_state(websocket: WebSocket, state: SimState) -> None:
+async def _stream_state(
+    websocket: WebSocket, state: SimState, telemetry: PoseTelemetry
+) -> None:
+    """Streams sim state back on the pose socket.
+
+    `telemetry` is this connection's, not the shared sim's: the HUD describes how
+    *this* client's frames retargeted, and with two clients connected a shared
+    one would show whoever sent last.
+    """
     while True:
         await websocket.send_json(
             {
                 "time": state.sim.time,
                 "qpos": state.sim.actuated_qpos().tolist(),
-                "hud": state.hud.payload,
+                "hud": telemetry.hud_payload(),
             }
         )
         await asyncio.sleep(1 / 60)
@@ -172,23 +176,21 @@ async def pose_socket(websocket: WebSocket) -> None:
     state: SimState = websocket.app.state.sim_state
     telemetry = PoseTelemetry(state.sim.actuator_names)
 
-    sender = asyncio.create_task(_stream_state(websocket, state))
+    sender = asyncio.create_task(_stream_state(websocket, state, telemetry))
     try:
         while True:
             msg = await websocket.receive_json()
             frame = PoseFrame(**msg)
             started = time.perf_counter()
             state.qpos_target = state.retargeter.solve(frame)
-            state.hud.update(
-                frame, state.retargeter.last_solve, time.perf_counter() - started
-            )
-            for line in telemetry.record(
+            telemetry.record(
                 frame,
                 state.retargeter.last_solve,
                 state.qpos_target,
                 state.sim.actuated_qpos(),
                 time.perf_counter() - started,
-            ):
+            )
+            for line in telemetry.log_lines():
                 logger.info("%s", line)
     except WebSocketDisconnect:
         logger.info("pose client disconnected: %s", websocket.client)
