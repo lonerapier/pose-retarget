@@ -81,16 +81,20 @@ def limb_directions_from_joints(
     """Forward map: the (upper arm, forearm) directions joints 1-4 produce."""
     sx, h1, h2 = _arm_axes(side)
     q1, q2, q3, q4 = (float(v) for v in q)
-    upper_arm = np.array([
-        sx * np.sin(q1) * np.cos(q2),
-        -np.sin(q2),
-        -np.cos(q1) * np.cos(q2),
-    ])
-    v = np.array([
-        np.cos(q3) * np.sin(q4),
-        -np.sin(q3) * np.sin(q4),
-        -np.cos(q4),
-    ])
+    upper_arm = np.array(
+        [
+            sx * np.sin(q1) * np.cos(q2),
+            -np.sin(q2),
+            -np.cos(q1) * np.cos(q2),
+        ]
+    )
+    v = np.array(
+        [
+            np.cos(q3) * np.sin(q4),
+            -np.sin(q3) * np.sin(q4),
+            -np.cos(q4),
+        ]
+    )
     forearm = axis_rotation(h1, q1) @ axis_rotation(h2, q2) @ v
     return upper_arm, forearm
 
@@ -139,6 +143,15 @@ class Branch:
     # retarget is wrong" and "the robot doesn't bend that way".
     clamped: np.ndarray = field(
         default_factory=lambda: np.zeros(len(STAGE12_JOINTS), dtype=bool)
+    )
+    # Per joint: how observable this frame made the angle, in [0, 1]. Only q1 and
+    # q3 have one — the other two are determined by the limb directions
+    # everywhere — so q2 and q4 sit at 1. Recorded because it's the one number
+    # that says how *hard* the pose is: it goes to 0 exactly at the singularities
+    # (arm straight, arm out to the side) where the measured angle stops meaning
+    # anything, which is the demo HUD's margin readout.
+    trust: np.ndarray = field(
+        default_factory=lambda: np.ones(len(STAGE12_JOINTS), dtype=float)
     )
 
 
@@ -195,6 +208,7 @@ def solve_branch(
     """
     sx, h1, h2 = _arm_axes(side)
     clamped = np.zeros(len(STAGE12_JOINTS), dtype=bool)
+    trust = np.ones(len(STAGE12_JOINTS), dtype=float)
 
     def measured(angle: float, i: int) -> float:
         """This frame's raw solution for joint `i`, on a commandable turn."""
@@ -237,14 +251,16 @@ def solve_branch(
     # magnitude is carried by the trust weight instead.
     turn = 1.0 if cos_q2 >= 0.0 else -1.0
     q1 = measured(float(np.arctan2(turn * sx * upper_arm[0], -turn * upper_arm[2])), 0)
-    q1 = commanded(mix(0, q1, _trust(abs(cos_q2), OBSERVABLE_COS_Q2)), 0)
+    trust[0] = _trust(abs(cos_q2), OBSERVABLE_COS_Q2)
+    q1 = commanded(mix(0, q1, trust[0]), 0)
 
     # --- stage 2: the forearm, seen from the upper arm, fixes q3, q4 ---
     v = (axis_rotation(h1, q1) @ axis_rotation(h2, q2)).T @ forearm
     sin_q4 = float(np.linalg.norm(v[:2]))  # = sin(q4), and q4 in [0, pi]
 
     q3 = measured(float(np.arctan2(-v[1], v[0])), 2)
-    q3 = commanded(mix(2, q3, _trust(sin_q4, OBSERVABLE_SIN_Q4)), 2)
+    trust[2] = _trust(sin_q4, OBSERVABLE_SIN_Q4)
+    q3 = commanded(mix(2, q3, trust[2]), 2)
 
     # Best q4 for whatever q3 ended up being: maximise v . v(q3, q4) over q4.
     # Unconstrained this is exactly arccos(-v[2]); with q3 clamped it recovers
@@ -253,7 +269,7 @@ def solve_branch(
     q4 = float(np.arctan2(np.cos(q3) * v[0] - np.sin(q3) * v[1], -v[2]))
     q4 = commanded(measured(q4, 3), 3)
 
-    return Branch(q=np.array([q1, q2, q3, q4]), clamped=clamped)
+    return Branch(q=np.array([q1, q2, q3, q4]), clamped=clamped, trust=trust)
 
 
 class Stage12Solver:
@@ -287,6 +303,8 @@ class Stage12Solver:
         self.previous = self.rest.copy()
         # Which joints the last accepted solve had to pin to a stop for telemetry
         self.last_clamped = np.zeros(len(STAGE12_JOINTS), dtype=bool)
+        # That solve's per-joint observability, same purpose.
+        self.last_trust = np.ones(len(STAGE12_JOINTS), dtype=float)
 
     def _pointing_error(
         self, q: np.ndarray, upper_arm: np.ndarray, forearm: np.ndarray
@@ -348,4 +366,5 @@ class Stage12Solver:
         best = self._branch(upper_arm, forearm, positive, smoothing=True)
         self.previous = best.q.copy()
         self.last_clamped = best.clamped.copy()
+        self.last_trust = best.trust.copy()
         return self.previous.copy()

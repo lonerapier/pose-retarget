@@ -10,6 +10,7 @@ streams state back.
 import asyncio
 import logging
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -19,8 +20,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.control.position import PositionController
 from app.retarget.mapper import PoseFrame
 from app.retarget.retargeter import Retargeter
+from app.sim.renderer import SimRenderer
 from app.sim.simulator import Simulator
-from app.telemetry import PoseTelemetry
+from app.telemetry import HudMeter, PoseTelemetry
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -41,6 +43,14 @@ class SimState:
         self.qpos_target = self.sim.actuated_qpos()
         self.viewer = None
         self.tick_count = 0
+        # Guards MjData against readers on other threads. Only the offscreen
+        # renderer takes it today; the physics loop holds it while stepping.
+        self.data_lock = threading.Lock()
+        self.renderer = SimRenderer(self.sim, self.data_lock)
+        # Last frame's HUD numbers. Lives on the shared state rather than
+        # per-connection because the demo page's two sockets are separate
+        # connections: pose goes in on one, sim frames come back on the other.
+        self.hud = HudMeter()
 
         # The model's 2ms timestep is much shorter than a 60Hz tick, so one
         # mj_step per tick would run the sim at 0.12x realtime and the arm could
@@ -65,8 +75,9 @@ class SimState:
         # Read qpos_target once per tick: the websocket handler can replace it
         # between substeps, and every substep should track one target.
         ctrl = self.controller.ctrl(self.qpos_target)
-        for _ in range(self.substeps):
-            self.sim.step(ctrl)
+        with self.data_lock:
+            for _ in range(self.substeps):
+                self.sim.step(ctrl)
         self.tick_count += 1
         if self.viewer is not None:
             self.viewer.sync()
@@ -116,6 +127,7 @@ async def lifespan(app: FastAPI):
     loop_task = asyncio.create_task(_physics_loop(state))
     yield
     loop_task.cancel()
+    state.renderer.shutdown()
     if state.viewer is not None:
         state.viewer.close()
 
@@ -139,10 +151,13 @@ def health() -> dict:
 
 async def _stream_state(websocket: WebSocket, state: SimState) -> None:
     while True:
-        await websocket.send_json({
-            "time": state.sim.time,
-            "qpos": state.sim.actuated_qpos().tolist(),
-        })
+        await websocket.send_json(
+            {
+                "time": state.sim.time,
+                "qpos": state.sim.actuated_qpos().tolist(),
+                "hud": state.hud.payload,
+            }
+        )
         await asyncio.sleep(1 / 60)
 
 
@@ -164,6 +179,9 @@ async def pose_socket(websocket: WebSocket) -> None:
             frame = PoseFrame(**msg)
             started = time.perf_counter()
             state.qpos_target = state.retargeter.solve(frame)
+            state.hud.update(
+                frame, state.retargeter.last_solve, time.perf_counter() - started
+            )
             for line in telemetry.record(
                 frame,
                 state.retargeter.last_solve,
@@ -176,3 +194,35 @@ async def pose_socket(websocket: WebSocket) -> None:
         logger.info("pose client disconnected: %s", websocket.client)
     finally:
         sender.cancel()
+
+
+@app.websocket("/ws/sim")
+async def sim_socket(websocket: WebSocket) -> None:
+    """Streams the shared sim as JPEG frames, so a browser page can show the
+    robot next to the pose it's tracking and record both as one video.
+
+    Binary frames rather than an MJPEG `<img>`: the demo page composites into a
+    canvas, and an image loaded cross-origin would taint it and take
+    MediaRecorder with it.
+    """
+    await websocket.accept()
+    logger.info("sim video client connected: %s", websocket.client)
+    state: SimState = websocket.app.state.sim_state
+    state.renderer.acquire()
+
+    # Poll rather than get woken: the renderer runs on a plain thread, and a
+    # sequence check at twice its framerate costs less than marshalling a
+    # wakeup onto the event loop for every frame.
+    poll = state.renderer.period / 2
+    last_seq = -1
+    try:
+        while True:
+            seq, frame = state.renderer.latest()
+            if frame is not None and seq != last_seq:
+                last_seq = seq
+                await websocket.send_bytes(frame)
+            await asyncio.sleep(poll)
+    except WebSocketDisconnect:
+        logger.info("sim video client disconnected: %s", websocket.client)
+    finally:
+        state.renderer.release()

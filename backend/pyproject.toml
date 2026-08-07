@@ -7,6 +7,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "mujoco>=3.6.0",
     "numpy>=2.5.1",
+    "pillow>=12.3.0",
     "scipy>=1.18.0",
     "uvicorn[standard]>=0.52.0",
     "websockets>=17.0",

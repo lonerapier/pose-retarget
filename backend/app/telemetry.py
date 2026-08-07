@@ -4,7 +4,9 @@ Everything the old `qpos=[...16 floats...]` line carried, split per arm and
 labelled, so a value can be placed at a glance while debugging live. Joint
 values stay as plain lists in actuator order (joints 1-7 then the gripper).
 
-Backend only: the browser gets no extra payload from this.
+`PoseTelemetry` is backend only — it renders log lines and the browser never
+sees them. `HudMeter` is the browser-facing counterpart: the same per-frame
+state, reduced to the handful of numbers the demo page's HUD draws.
 """
 
 import os
@@ -17,6 +19,11 @@ from app.retarget.retargeter import ArmSolve
 
 # Seconds between reports. One a second stays readable live; 0 logs every frame.
 LOG_INTERVAL = float(os.environ.get("POSE_LOG_INTERVAL", "1.0"))
+
+# How much of the previous rate an fps sample keeps. Frame arrivals are jittery
+# enough that the instantaneous 1/dt flickers by tens of Hz between frames, which
+# is unreadable on a HUD; this settles in well under a second.
+_FPS_SMOOTHING = 0.85
 
 
 def _fmt_landmark(mark: Landmark) -> str:
@@ -128,3 +135,65 @@ class PoseTelemetry:
             lines.append(f"{side} target: {_fmt_list(target[idx])}")
             lines.append(f"{side} actual: {_fmt_list(actual[idx])}")
         return lines
+
+
+class HudMeter:
+    """The per-frame numbers the demo page overlays on the video.
+
+    Deliberately a summary and not the whole state: this rides the same
+    websocket as the sim frames at pose rate, and the HUD only has room for
+    things a viewer can read while the arms are moving.
+    """
+
+    def __init__(self) -> None:
+        self._last_frame: float | None = None
+        self._fps = 0.0
+        # Read by the state-streaming task, written by the receive task. Rebound
+        # whole rather than mutated, so a reader always gets one frame's numbers
+        # and never a half-updated dict.
+        self.payload: dict = {}
+
+    def update(
+        self,
+        frame: PoseFrame,
+        solves: dict[str, ArmSolve],
+        solve_seconds: float,
+    ) -> None:
+        now = time.monotonic()
+        if self._last_frame is not None:
+            delta = now - self._last_frame
+            if delta > 0:
+                sample = 1 / delta
+                self._fps = (
+                    sample
+                    if self._fps == 0
+                    else _FPS_SMOOTHING * self._fps + (1 - _FPS_SMOOTHING) * sample
+                )
+        self._last_frame = now
+
+        payload: dict = {
+            "pose_fps": round(self._fps, 1),
+            "retarget_ms": round(1e3 * solve_seconds, 2),
+            "arms": {},
+        }
+        if frame.t_capture is not None:
+            # Same caveat as the log line: this is browser wall clock against
+            # server wall clock, so it's a true latency only on one machine.
+            payload["capture_lag_ms"] = round(1e3 * (time.time() - frame.t_capture), 1)
+
+        for side in ("left", "right"):
+            solve = solves.get(side)
+            if solve is None:
+                continue
+            arm: dict = {"held": solve.held}
+            if solve.trust is not None:
+                # The pose's distance from the nearest singularity, as the solver
+                # itself scores it: 1 is fully determined, 0 means at least one
+                # shoulder angle has stopped being observable and is relaxing to
+                # rest rather than tracking.
+                arm["margin"] = round(float(np.min(solve.trust)), 3)
+            if solve.clamped is not None:
+                arm["clamped"] = [i + 1 for i, hit in enumerate(solve.clamped) if hit]
+            payload["arms"][side] = arm
+
+        self.payload = payload

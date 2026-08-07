@@ -51,6 +51,7 @@ class ArmSolve:
     forearm: np.ndarray | None = None  # forearm vector, same frame
     q: np.ndarray | None = None  # joint angles 1-4
     clamped: np.ndarray | None = None  # per-joint: solve landed outside limits
+    trust: np.ndarray | None = None  # per-joint observability in [0, 1]
     ee: np.ndarray | None = None  # control point in world frame
 
 
@@ -276,6 +277,7 @@ class Retargeter:
                 forearm=forearm,
                 q=q,
                 clamped=solver.last_clamped.copy(),
+                trust=solver.last_trust.copy(),
             )
 
         # Not needed to build the command (qpos is written directly)

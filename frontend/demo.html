@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>bim — demo view</title>
+    <style>
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background: #05080b;
+        color: #e8f4ff;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #app {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        padding: 16px;
+      }
+      /* The canvas is a fixed 1280x720 buffer — that's what gets recorded — and
+         only its displayed size follows the window. */
+      #stage {
+        width: min(100%, 1280px);
+        aspect-ratio: 16 / 9;
+        border-radius: 10px;
+        background: #05080b;
+        touch-action: none;
+        cursor: grab;
+      }
+      #stage:active { cursor: grabbing; }
+      /* Source for MediaPipe and for the inset. Never displayed: everything the
+         page shows is composited into the canvas so the recording matches. */
+      #video { display: none; }
+      #controls {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        font-size: 13px;
+        color: #8fa8bd;
+      }
+      button {
+        font: inherit;
+        color: #05080b;
+        background: #38e8d0;
+        border: 0;
+        border-radius: 6px;
+        padding: 8px 16px;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+      #hint { font-size: 12px; color: #5d7186; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="stage"></canvas>
+      <div id="controls">
+        <button id="record">Record</button>
+        <label><input type="checkbox" id="pip" checked /> webcam inset</label>
+        <label><input type="checkbox" id="torso-frame" checked /> torso frame</label>
+        <span id="status">starting…</span>
+      </div>
+      <div id="hint">drag the right pane to orbit · recording saves a .webm</div>
+    </div>
+    <script type="module" src="/src/demo.ts"></script>
+  </body>
+</html>

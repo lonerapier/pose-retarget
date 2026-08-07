@@ -78,6 +78,25 @@ just install && just dev
 
 `just check` runs everything verifiable without a camera: the closed form against MuJoCo forward kinematics, the wired-up path against synthetic landmarks (accuracy, continuity through both singularities, torso invariance, steadiness under landmark noise), and the hand frame against its own symmetries.
 
+### Demo view
+
+```bash
+just demo   # then open http://localhost:5173/demo.html
+```
+
+A second page, for showing the system rather than operating it: the sim on the left, the world landmarks driving it on the right, and no webcam beyond a small inset. Both halves are drawn into one 1280x720 canvas, and **Record** captures that canvas straight to a `.webm` — so the clip needs no screen-recording tool and doesn't depend on how the windows happened to be arranged.
+
+The sim half is rendered offscreen by the backend ([`renderer.py`](backend/app/sim/renderer.py)) and streamed as JPEG frames over `/ws/sim`, rather than being the native viewer window. Only a page that owns both halves can composite and record them together. The renderer thread starts when the first client connects and stops when the last one leaves, so `just backend` alone costs nothing extra. Framing is env-tunable (`SIM_CAM_AZIMUTH`, `SIM_CAM_DISTANCE`, `SIM_RENDER_FPS`, …).
+
+The pose half ([`skeleton3d.ts`](frontend/src/pose/skeleton3d.ts)) draws the **world** landmarks in perspective, not the image-space overlay `index.html` uses. Those are what the retargeter actually consumes, and they carry the depth the image overlay throws away — drag the pane to orbit and the z axis, the one a single webcam estimates worst, becomes something you can look at directly. The torso frame is drawn as a triad at the hip origin: it turns with the operator, which is the reason the retarget survives them turning or leaning.
+
+The HUD's *singularity margin* is the solver's own observability weight (`Branch.trust`), not a separate estimate. It falls to zero exactly where a shoulder angle stops being determined by the pose — arm straight, or raised out to the side — which is where an iterative IK would be thrashing and where [`sew.py`](backend/app/retarget/sew.py) instead relaxes toward rest.
+
+| Flag | Effect |
+| --- | --- |
+| `?synthetic=1` | Drive everything from a generated pose. No camera and no models, but the same landmarks down the same socket, so the robot still moves — for checking framing and recording without being in shot. |
+| `?hands=0` | Pose model only, no hand landmarks. |
+
 ## Improvements
 
 **Sew-Mimic**
