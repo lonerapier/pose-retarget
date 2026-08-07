@@ -15,7 +15,11 @@ as the raw model. `prefix=""` on the attach is what keeps those names identical.
   <compiler meshdir="../../openarm_mujoco/v2/assets" angle="radian"/>
   <visual>
     <headlight diffuse="0.75 0.75 0.75" ambient="0.45 0.45 0.45" specular="0.2 0.2 0.2"/>
-    <global azimuth="150" elevation="-20"/>
+    <!-- offwidth/offheight bound MuJoCo's offscreen framebuffer, and default to
+         640x480. app/sim/renderer.py renders a 640x720 portrait pane for the
+         demo page, which needs the taller buffer or the render fails outright.
+         Only offscreen rendering reads these; the native viewer is unaffected. -->
+    <global azimuth="150" elevation="-20" offwidth="640" offheight="720"/>
   </visual>
   <asset>
     <texture type="skybox" builtin="gradient" rgb1="0.95 0.96 0.98" rgb2="0.75 0.78 0.84" width="512" height="3072"/>

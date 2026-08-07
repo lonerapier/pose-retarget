@@ -40,6 +40,22 @@ dev:
     (cd frontend && npm run dev) &
     wait
 
+# Demo view: the sim and the pose driving it, side by side in one browser page,
+# with a Record button that saves a .webm. No native viewer window — the sim is
+# rendered offscreen and streamed to the page, which is what lets both halves be
+# captured as one video. Append ?synthetic=1 to drive it from a generated pose
+# and check the framing without being in shot.
+demo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'kill 0' EXIT
+    (cd backend && uv run uvicorn app.main:app --port 8000) &
+    (cd frontend && npm run dev) &
+    echo
+    echo "  demo view: http://localhost:5173/demo.html"
+    echo
+    wait
+
 # Sanity-check: load the OpenArm model, command a joint target, step physics
 sim-check:
     cd backend && uv run python -c "\

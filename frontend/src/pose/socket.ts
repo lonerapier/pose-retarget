@@ -14,6 +14,29 @@ const LANDMARK_INDEX = {
   rightHip: 24,
 } as const
 
+/** One arm's line in the backend's HUD summary (see `telemetry.HudMeter`). */
+export type ArmHud = {
+  /** Limb directions were degenerate, so the arm kept its previous pose. */
+  held: boolean
+  /** How far this pose is from a shoulder singularity, in [0, 1]. */
+  margin?: number
+  /** Joint numbers (1-4) the solve had to pin to a limit. */
+  clamped?: number[]
+}
+
+export type Hud = {
+  pose_fps?: number
+  retarget_ms?: number
+  capture_lag_ms?: number
+  arms?: Partial<Record<'left' | 'right', ArmHud>>
+}
+
+export type SimStateMessage = {
+  time: number
+  qpos: number[]
+  hud?: Hud
+}
+
 function toPayload(lm: Landmark) {
   return { x: lm.x, y: lm.y, z: lm.z }
 }
@@ -56,6 +79,13 @@ function handPayload(landmarks: Landmark[] | undefined) {
 export class PoseSocket {
   private ws: WebSocket
   private open = false
+  /**
+   * The backend's latest reply: sim time, joint angles, and the HUD summary of
+   * how the last frame retargeted. Kept as the newest value rather than
+   * delivered as events, because the only consumer is a draw loop that wants
+   * whatever is current when it runs, not every message that arrived since.
+   */
+  state: SimStateMessage | null = null
 
   constructor(url: string) {
     this.ws = new WebSocket(url)
@@ -68,7 +98,17 @@ export class PoseSocket {
       console.log('pose socket: disconnected')
     }
     this.ws.onerror = (err) => console.error('pose socket: error', err)
-    this.ws.onmessage = (event) => console.debug('pose socket: ack', event.data)
+    this.ws.onmessage = (event) => {
+      try {
+        this.state = JSON.parse(event.data as string)
+      } catch (err) {
+        console.error('pose socket: bad state message', err)
+      }
+    }
+  }
+
+  get isOpen(): boolean {
+    return this.open
   }
 
   /** Sends one frame's landmarks if a person is detected and the socket is
