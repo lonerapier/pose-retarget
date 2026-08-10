@@ -27,23 +27,24 @@ Why Mediapipe for landmark detection?
 
 ## Demos
 
-Demonstrations highlighting retargeting performance and edge-case behavior across all joints:
+Demonstrations highlighting retargeting performance and edge-case behavior across all joints. Recorded from the [demo view](#demo-view); the recordings are hosted as release/PR attachments rather than committed, to keep the repo clone small.
 
 1. **Basic Movements**: Smooth retargeting during zig-zag trajectories and full-extension arm singularities.
 
-![basic-movements](./assets/demo-movement.mp4)
+<!-- demo:movement -->
 
 2. **Wrist Tracking**: Wrist orientation across dynamic poses (noticeable jitter at ~32s stems from noisy landmark estimation).
 
-![wrist-movements](./assets/demo-wrists.mp4)
+<!-- demo:wrists -->
 
 3. **Occlusion & Singularities**: Tracking degradation under partial landmark visibility, with immediate recovery upon full re-detection.
 
-![singularity-issues](./assets/demo-singularity.mp4)
+<!-- demo:singularity -->
 
-4. **Depth Perception**: Motion limits when moving hands along the camera's depth axis which is a known disdvantage of RGB cameras.
+4. **Depth Perception**: Motion limits when moving hands along the camera's depth axis, a known disadvantage of RGB cameras.
 
-![depth-issue](./assets/demo-depth-problem.mp4)
+<!-- demo:depth -->
+
 
 ## Assumptions
 

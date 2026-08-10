@@ -15,3 +15,9 @@ __pycache__/
 
 .DS_Store
 .ruff_cache/
+# Demo recordings: 40MB of mp4, hosted as PR/release attachments instead
+assets/
+
+notes.md
+problem.pdf
+.claude/
