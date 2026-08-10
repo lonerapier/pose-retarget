@@ -20,8 +20,14 @@ export type ArmHud = {
   held: boolean
   /** How far this pose is from a shoulder singularity, in [0, 1]. */
   margin?: number
-  /** Joint numbers (1-4) the solve had to pin to a limit. */
+  /** Joint numbers (1-7) the solve had to pin to a limit. */
   clamped?: number[]
+  /** No usable hand orientation this frame, so joints 5-7 kept their value. */
+  wrist_held?: boolean
+  /** Angle between the commanded ee frame and the measured hand, in degrees. */
+  wrist_err?: number
+  /** Same, but for the approach axis alone — the part a viewer can see. */
+  approach_err?: number
 }
 
 export type Hud = {

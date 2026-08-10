@@ -121,8 +121,13 @@ export function drawHud(
 
     // Held and clamped both mean the arm isn't reproducing the pose, for
     // different reasons, and both are invisible in the joint angles themselves.
+    // So is a wrist running on a stale hand: joints 5-7 sitting still looks the
+    // same whether the hand was measured and steady or never detected at all.
     const flags: string[] = []
     if (arm?.held) flags.push('HELD')
+    if (arm?.wrist_held) flags.push('NO HAND')
+    else if (arm?.approach_err !== undefined && arm.approach_err > 10)
+      flags.push(`wrist ${arm.approach_err.toFixed(0)}° off`)
     if (arm?.clamped?.length) flags.push(`J${arm.clamped.join(',')} at limit`)
     if (flags.length) {
       ctx.fillStyle = WARN
