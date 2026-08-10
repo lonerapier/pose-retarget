@@ -1,8 +1,8 @@
 """Converts PoseFrame to Actuator space.
 
 Two paths live here, chosen by `mode`:
-- "sew": (default) closed-form SEW-Mimic stages 1-2. Matches the human's *limb
-orientations*.
+- "sew": (default) closed-form SEW-Mimic, all three stages. Matches the human's
+*limb orientations* for joints 1-4 and their *hand orientation* for joints 5-7.
 - "ik": position-only damped least squares on the ee site.
 """
 
@@ -14,14 +14,35 @@ import mujoco
 import numpy as np
 
 from app.retarget.ik import solve_site_ik
-from app.retarget.mapper import PoseFrame, arm_extension, limb_directions, torso_frame
-from app.retarget.sew import STAGE12_JOINTS, Stage12Solver
+from app.retarget.mapper import (
+    PoseFrame,
+    arm_extension,
+    hand_orientation,
+    limb_directions,
+    torso_frame,
+)
+from app.retarget.sew import (
+    STAGE3_JOINTS,
+    STAGE12_JOINTS,
+    Stage12Solver,
+    WristSolver,
+    wrist_euler_signs,
+)
 from app.sim.simulator import Simulator
 
 logger = logging.getLogger(__name__)
 
 MODES = ("sew", "ik")
 DEFAULT_MODE = "sew"
+
+# SEW-Mimic's R_align: the fixed relabelling between the hand frame's axis
+# convention and the robot end effector's. Identity here, and deliberately named
+# rather than dropped, because it is identity for a *reason* worth keeping
+# visible: `mapper.hand_orientation` was written to emit H in the robot's own ee
+# convention (x dorsal, z back along the approach the gripper reaches out on),
+# so the alignment was paid for in the perception layer instead of carried as a
+# matrix here. Anything that changes that convention changes this.
+HAND_TO_EE_ALIGN = np.eye(3)
 
 # Elbow angles sampled when measuring each arm's reach.
 _REACH_SAMPLES = 64
@@ -49,10 +70,17 @@ class ArmSolve:
     held: bool  # limb directions were degenerate; the arm kept its last pose
     upper_arm: np.ndarray | None = None  # upper arm vector, in this arm's base frame
     forearm: np.ndarray | None = None  # forearm vector, same frame
-    q: np.ndarray | None = None  # joint angles 1-4
+    # Measured hand orientation, same frame: stage 3's whole input. None when no
+    # hand was detected or its landmarks were too collapsed to fix a frame,
+    # which is a different and far more common event than `held` — MediaPipe
+    # Hands drops out constantly where the pose model does not.
+    hand_R: np.ndarray | None = None
+    wrist_held: bool = False  # no usable hand; joints 5-7 kept their last value
+    q: np.ndarray | None = None  # joint angles 1-7
     clamped: np.ndarray | None = None  # per-joint: solve landed outside limits
     trust: np.ndarray | None = None  # per-joint observability in [0, 1]
     ee: np.ndarray | None = None  # control point in world frame
+    ee_R: np.ndarray | None = None  # achieved ee orientation, arm base frame
 
 
 @dataclass
@@ -63,16 +91,31 @@ class ArmGeometry:
     the control point can no more fold onto the shoulder than a person can touch
     their own shoulder with their wrist.
 
-    Everything below `stage12_range` belongs to the position path. The SEW path
+    Everything below `ee_local_R` belongs to the position path. The SEW path
     uses only the base rotation (to express the human's limb directions in the
-    frame the closed form is derived in) and the stage-1/2 joint addresses; it
-    never targets a position, so reach can't fail.
+    frame the closed form is derived in), the joint addresses, and the two wrist
+    constants; it never targets a position, so reach can't fail.
     """
 
     site_id: int
     base_R: np.ndarray  # arm base frame in world axes, columns are its axes
     stage12_qposadr: np.ndarray  # qpos addresses of joints 1-4, in order
     stage12_range: np.ndarray  # joint limits, shape (4, 2)
+    stage3_qposadr: np.ndarray  # qpos addresses of joints 5-7, in order
+    stage3_range: np.ndarray  # joint limits, shape (3, 2)
+    # Body whose frame the wrist rotates relative to: the forearm link, which
+    # carries joint 5's parent frame. R^{0,4} in sew.py's naming, the paper's
+    # frame 5. Read from mj_forward rather than composed by hand so it stays
+    # right if a body ever gains a quat.
+    forearm_body: int
+    # Which elementary rotation each wrist joint applies, from the model's own
+    # axes — the paper's equations (16)-(18).
+    wrist_signs: np.ndarray
+    # R^{7,T}_local: the constant mount, i.e. where the tool frame sits inside
+    # joint 7's frame. Identity on OpenArm (the control point site carries no
+    # rotation and sits on the joint-7 origin), measured rather than assumed so
+    # a model that mounts its gripper differently is handled, not mis-solved.
+    ee_local_R: np.ndarray
     shoulder: np.ndarray  # world position of the first shoulder joint's axis
     min_reach: float  # inner radius of the reachable shell
     max_reach: float  # outer radius, arm straight
@@ -123,9 +166,8 @@ class Retargeter:
             )
 
         # _measure_arm left qpos wherever the reach scan ended; put it back to
-        # neutral so the first solve warm-starts from something sane. In "sew"
-        # mode this is also what leaves joints 5-7 at neutral, where they stay
-        # until stage 3 exists.
+        # neutral so the first solve warm-starts from something sane, and so
+        # both stages read their rest posture off the same pose.
         self._reset_pose()
 
         self.stage12 = {
@@ -134,6 +176,16 @@ class Retargeter:
                 lower=arm.stage12_range[:, 0],
                 upper=arm.stage12_range[:, 1],
                 initial=self.ik_data.qpos[arm.stage12_qposadr],
+            )
+            for side, arm in (("left", self.left), ("right", self.right))
+        }
+        self.stage3 = {
+            side: WristSolver(
+                side,
+                lower=arm.stage3_range[:, 0],
+                upper=arm.stage3_range[:, 1],
+                signs=arm.wrist_signs,
+                initial=self.ik_data.qpos[arm.stage3_qposadr],
             )
             for side, arm in (("left", self.left), ("right", self.right))
         }
@@ -174,15 +226,27 @@ class Retargeter:
         shoulder_joint = self._id(mujoco.mjtObj.mjOBJ_JOINT, f"openarm_{side}_joint1")
         elbow_joint = self._id(mujoco.mjtObj.mjOBJ_JOINT, f"openarm_{side}_joint4")
         base_body = self._id(mujoco.mjtObj.mjOBJ_BODY, f"openarm_{side}_base_link")
+        forearm_body = self._id(mujoco.mjtObj.mjOBJ_BODY, f"openarm_{side}_link4")
+        ee_body = self._id(mujoco.mjtObj.mjOBJ_BODY, f"openarm_{side}_ee_base_link")
         stage12 = [
             self._id(mujoco.mjtObj.mjOBJ_JOINT, f"openarm_{side}_joint{n}")
             for n in STAGE12_JOINTS
+        ]
+        stage3 = [
+            self._id(mujoco.mjtObj.mjOBJ_JOINT, f"openarm_{side}_joint{n}")
+            for n in STAGE3_JOINTS
         ]
 
         self._reset_pose()
         # base link is fixed relative to the torso
         base_R = self.ik_data.xmat[base_body].reshape(3, 3).copy()
         shoulder = self.ik_data.xanchor[shoulder_joint].copy()
+        # Both wrist constants are pose-independent — the mount rotates with
+        # joint 7 and the axes are fixed in their own frames — so qpos0 is as
+        # good a place to read them as any.
+        ee_local_R = self.ik_data.xmat[ee_body].reshape(
+            3, 3
+        ).T @ self.ik_data.site_xmat[site_id].reshape(3, 3)
         rest_offset = self.ik_data.site_xpos[site_id] - shoulder
         neutral_direction = rest_offset / np.linalg.norm(rest_offset)
 
@@ -201,6 +265,11 @@ class Retargeter:
             base_R=base_R,
             stage12_qposadr=self.model.jnt_qposadr[stage12].copy(),
             stage12_range=self.model.jnt_range[stage12].copy(),
+            stage3_qposadr=self.model.jnt_qposadr[stage3].copy(),
+            stage3_range=self.model.jnt_range[stage3].copy(),
+            forearm_body=forearm_body,
+            wrist_signs=wrist_euler_signs(self.model.jnt_axis[stage3]),
+            ee_local_R=ee_local_R,
             shoulder=shoulder,
             min_reach=min(radii),
             max_reach=max(radii),
@@ -220,19 +289,45 @@ class Retargeter:
             return self._solve_sew(frame)
         return self._solve_site_ik(frame)
 
+    def _wrist_target(self, arm: ArmGeometry, hand_R: np.ndarray) -> np.ndarray:
+        """SEW-Mimic's R^{4,7}_des, from a hand orientation already in this
+        arm's base frame.
+
+        Two steps, and the first is the whole of the paper's
+
+            R^{0,7}_des = H [R_align]^T [R^{7,T}_local]^T
+
+        read right to left as "peel the constants off the goal". The goal is
+        that the *tool* frame sit where the hand is; the tool frame is joint 7's
+        frame plus a fixed axis relabelling and a fixed mount; so what the
+        joints have to deliver is the goal with both of those stripped off.
+        """
+        desired_joint7 = hand_R @ HAND_TO_EE_ALIGN.T @ arm.ee_local_R.T
+
+        # Relative to the frame stages 1-2 just fixed. Read back out of
+        # mj_forward, so this is the pose the arm was actually left in, clamping
+        # and all, rather than the pose it was asked for.
+        forearm_R = arm.base_R.T @ self.ik_data.xmat[arm.forearm_body].reshape(3, 3)
+        return forearm_R.T @ desired_joint7
+
     def _solve_sew(self, frame: PoseFrame) -> np.ndarray:
-        """Closed-form SEW-Mimic stages 1-2.
+        """Closed-form SEW-Mimic, all three stages.
 
         Per arm: read the human's two limb directions, express them in that
-        arm's base frame, solve joints 1-4 analytically.
+        arm's base frame, solve joints 1-4 analytically; then do the same with
+        the hand orientation for joints 5-7.
+
+        Two passes, because stage 3 is defined relative to the forearm frame and
+        so cannot be solved until stages 1-2 have been applied and forward
+        kinematics run. The extra `mj_forward` is the price of reading that
+        frame off the model instead of re-deriving it here, which is worth
+        paying: the derivation would silently assume every link frame is
+        axis-aligned, and the model is free to stop being so.
 
         No iteration and no null space to drift, so a lost or degenerate
         landmark can just be skipped: the arm holds its last pose and picks back
         up on the next good frame with no accumulated error to unwind.
         """
-        # TODO: Joints 5-7 stay at neutral since nothing writes them. stage 3 needs a
-        # wrist orientation target that `mapper.hand_orientation` measures.
-
         torso = torso_frame(frame)
         if torso is None and not self._warned_no_torso:
             self._warned_no_torso = True
@@ -241,6 +336,8 @@ class Retargeter:
                 "to camera-frame limb directions, which rotate with the subject"
             )
 
+        # --- pass 1: stages 1-2, the arm ---
+        bases: dict[str, np.ndarray] = {}
         for side, arm in (("left", self.left), ("right", self.right)):
             if side == "left":
                 landmarks = (frame.left_shoulder, frame.left_elbow, frame.left_wrist)
@@ -250,7 +347,12 @@ class Retargeter:
             directions = limb_directions(*landmarks)
             if directions is None:
                 logger.debug("%s arm: degenerate limb directions, holding pose", side)
-                self.last_solve[side] = ArmSolve(held=True)
+                # The wrist holds too. Its own input may well be fine, but this
+                # only fires when a limb measures under a millimetre, i.e. when
+                # the skeleton is nonsense — and a hand frame attached to a
+                # nonsense skeleton is not worth trusting either.
+                self.stage3[side].hold()
+                self.last_solve[side] = ArmSolve(held=True, wrist_held=True)
                 continue
 
             solver = self.stage12[side]
@@ -269,8 +371,8 @@ class Retargeter:
             forearm = to_arm_base @ directions[1]
             q = solver.solve(upper_arm, forearm)
             self.ik_data.qpos[arm.stage12_qposadr] = q
+            bases[side] = to_arm_base
 
-            # Log metrics
             self.last_solve[side] = ArmSolve(
                 held=False,
                 upper_arm=upper_arm,
@@ -280,11 +382,51 @@ class Retargeter:
                 trust=solver.last_trust.copy(),
             )
 
-        # Not needed to build the command (qpos is written directly)
-        # Mainly done to get control plane values for logging.
+        # Puts the forearm frames where stages 1-2 just asked for them, which is
+        # what stage 3 is expressed relative to.
+        mujoco.mj_forward(self.model, self.ik_data)
+
+        # --- pass 2: stage 3, the wrist ---
+        for side, arm in (("left", self.left), ("right", self.right)):
+            solve = self.last_solve[side]
+            if side not in bases:
+                continue  # arm held; the wrist was held with it above
+
+            wrist = self.stage3[side]
+            hand = frame.left_hand if side == "left" else frame.right_hand
+            measured = None if hand is None else hand_orientation(hand, side)
+            if measured is None:
+                q567 = wrist.hold()
+                solve.wrist_held = True
+            else:
+                # Into this arm's base frame — the same change of basis the limb
+                # directions get, and left-multiplied only, because H's columns
+                # are vectors expressed in the frame being changed. Sandwiching
+                # it as `to_arm_base @ H @ to_arm_base.T` would be *rotating*
+                # the hand rather than re-describing it, and would look
+                # perfectly plausible while being wrong.
+                solve.hand_R = bases[side] @ measured
+                q567 = wrist.solve(self._wrist_target(arm, solve.hand_R))
+            self.ik_data.qpos[arm.stage3_qposadr] = q567
+
+            solve.q = np.concatenate([solve.q, q567])
+            solve.clamped = np.concatenate([solve.clamped, wrist.last_clamped])
+            # Joints 5-7 have no observability weight yet — the hand frame's own
+            # trust (how well the knuckle line fixes the roll) is measured but
+            # not yet consumed. Ones keep `min(trust)` reading as the arm's
+            # margin rather than being dragged down by a constant.
+            solve.trust = np.concatenate([solve.trust, np.ones(len(STAGE3_JOINTS))])
+
+        # Not needed to build the command (qpos is written directly). Mainly
+        # done to get control plane values for logging — and now also the
+        # achieved ee orientation, which is what the commanded hand orientation
+        # has to be scored against.
         mujoco.mj_forward(self.model, self.ik_data)
         for side, arm in (("left", self.left), ("right", self.right)):
             self.last_solve[side].ee = self.ik_data.site_xpos[arm.site_id].copy()
+            self.last_solve[side].ee_R = arm.base_R.T @ self.ik_data.site_xmat[
+                arm.site_id
+            ].reshape(3, 3)
         return self.ik_data.qpos[self.actuator_qposadr].copy()
 
     def _solve_site_ik(self, frame: PoseFrame) -> np.ndarray:

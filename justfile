@@ -82,8 +82,12 @@ sew-retarget-check:
 hand-check:
     cd backend && PYTHONPATH=. uv run python scripts/check_hand_frame.py
 
+# Check SEW stage 3 (the wrist) against the model and forward kinematics
+sew-stage3-check:
+    cd backend && PYTHONPATH=. uv run python scripts/check_sew_stage3.py
+
 # Run every check
-check: sim-check sew-check sew-retarget-check hand-check typecheck
+check: sim-check sew-check sew-retarget-check hand-check sew-stage3-check typecheck
 
 # Open the native MuJoCo viewer on the bimanual model, standalone (no backend)
 sim-view:
