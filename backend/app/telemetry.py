@@ -44,6 +44,25 @@ def _fmt_list(values: np.ndarray) -> str:
     return "[" + ", ".join(f"{v:.3f}" for v in values) + "]"
 
 
+def _wrist_errors(solve: ArmSolve) -> tuple[float, float] | None:
+    """How far the commanded end effector is from the hand it was aiming at.
+
+    Two numbers because they fail separately and mean different things. The
+    total is stage 3's accuracy; the approach is how far the gripper is pointing
+    from where the fingers point, and it is the one a viewer will notice. A
+    wrist that has run out of roll can be tens of degrees out on the total while
+    still pointing exactly right — see the joint-6 vs joint-5 saturation cases.
+    """
+    if solve.hand_R is None or solve.ee_R is None:
+        return None
+    cos = (np.trace(solve.ee_R.T @ solve.hand_R) - 1.0) / 2.0
+    total = np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+    approach = np.degrees(
+        np.arccos(np.clip(solve.ee_R[:, 2] @ solve.hand_R[:, 2], -1.0, 1.0))
+    )
+    return float(total), float(approach)
+
+
 @dataclass
 class Frame:
     """One frame of the pose->joints path, as both renderers need to see it.
@@ -158,6 +177,14 @@ class PoseTelemetry:
                 arm["margin"] = round(float(np.min(solve.trust)), 3)
             if solve.clamped is not None:
                 arm["clamped"] = [i + 1 for i, hit in enumerate(solve.clamped) if hit]
+            # Stage 3 is otherwise invisible on the HUD: joints 5-7 moving is
+            # not something a viewer can score by eye, and a wrist solved from a
+            # hand that was never detected looks exactly like one that was.
+            arm["wrist_held"] = solve.wrist_held
+            errors = _wrist_errors(solve)
+            if errors is not None:
+                arm["wrist_err"] = round(errors[0], 1)
+                arm["approach_err"] = round(errors[1], 1)
             payload["arms"][side] = arm
 
         return payload
@@ -192,6 +219,16 @@ class PoseTelemetry:
                     f"forearm={_fmt_vec(solve.forearm)} "
                     f"ee_pos={_fmt_vec(solve.ee)}{held}"
                 )
+                # Stage 3: what the wrist was aiming at and how close it got.
+                errors = _wrist_errors(solve)
+                if errors is not None:
+                    lines.append(
+                        f"{side} wrist: err={errors[0]:.1f}deg "
+                        f"approach={errors[1]:.1f}deg"
+                    )
+                elif not solve.held:
+                    lines.append(f"{side} wrist: no hand orientation, holding")
+
                 # How observable the pose made the two shoulder angles. A low
                 # margin is why a joint can sit still while the human moves.
                 if solve.trust is not None:
