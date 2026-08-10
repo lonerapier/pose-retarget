@@ -33,7 +33,7 @@ of time you stop wherever you are and still have something strictly better than 
 | 3   | 1:15–1:45     | **Slew limit + interpolate `qpos_target`**              | §6.3              |
 | 4   | ~~1:45–2:30~~ | ~~**Torso frame**~~ + ~~world landmarks~~ **DONE**      | §6.2, §6.5        |
 | 5   | ~~2:30–4:15~~ | ~~**Closed-form stages 1–2**~~ **DONE** — the real fix  | §0.2              |
-| 6   | 4:15–5:00     | **Wire joints 5–7**, retire `solve_site_ik`             | §0.3              |
+| 6   | ~~4:15–5:00~~ | ~~**Wire joints 5–7**~~ **DONE** (§7.8) · retire `solve_site_ik` still to do | §0.3, §7.8 |
 | 7   | 5:00–6:00     | **Intermediate target schema + JSONL metrics**          | §11, §6.4         |
 | 8   | 6:00–7:00     | Run the battery, tune `beta`, record the video          |                   |
 | 9   | 7:00–8:00     | Design document (3 pages)                               | §14 for citations |
@@ -141,10 +141,12 @@ The closed form replaces the entire IK path. On the way through, this becomes de
 
 Keep `ArmGeometry` only for the base-frame rotation and the shoulder anchor.
 
-**Joints 5–7**: hold them at a fixed neutral posture for today. Stage 3 needs a hand
-orientation we don't have (§7.4 #2) and is not worth the remaining hours. Say so
-explicitly in the design document, and cite MediaPipe Hands → HaMeR as the improvement
-path — the rubric rewards knowing what the better version looks like.
+**Joints 5–7** — this said "hold them at a fixed neutral posture for today; stage 3
+needs a hand orientation we don't have". Both halves are now out of date: the input
+landed in §7.7 and the stage in **§7.8**, and stage 3 turned out to be the *cheapest*
+of the three because OpenArm is the paper's perpendicular-wrist case. MediaPipe Hands →
+HaMeR remains the improvement path, but as a *perception* upgrade decided by §9.4's
+measurement, not as missing work.
 
 **Deleting code is a deliverable here.** The rubric asks you to justify each component;
 "we removed the reach-clamping machinery because orientation retargeting makes
@@ -255,7 +257,7 @@ have cost:
 
 | Dropped                           | Why                                                                                          | Cost                                                                                 |
 | --------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Wrist orientation (stage 3)       | ~~no hand orientation input yet~~ input now exists (§7.7); the *stage* is the remaining work | joints 5–7 static; EE orientation not tracked                                        |
+| ~~Wrist orientation (stage 3)~~   | ~~no hand orientation input yet~~ **built** — input §7.7, stage §7.8                         | ~~joints 5–7 static~~ EE orientation now tracked; 16.3% of SO(3) exactly reachable   |
 | Self-collision filter (§7.5 ph.4) | XPBD is a half-day on its own                                                                | arms may interpenetrate at the midline — **test this in the battery and mention it** |
 | mink / QP refinement (§8.1)       | closed form makes it unnecessary today                                                       | no exact wrist *position*, no collision constraints                                  |
 | Limb-length constraint (§6.6)     | ~half a day                                                                                  | depth noise still enters `u` and `l` — though far less than it entered positions     |
@@ -387,8 +389,12 @@ negated. Joints 2/3/4/5/7 keep the same axis signs.
 - **Forearm = 216 mm** (0.0955 + 0.1205), joint 4's origin to the wrist centre, along
   `(0,0,-1)` — **collinear with joint 5's axis**. ✅ Joint 5 is an exact
   forearm-direction proxy.
-- **Wrist is truly spherical**: joints 5, 6, 7 all pass through the `ee_base_link`
-  origin.
+- **Wrist is *functionally* spherical.** Joints 6 and 7 pass through the `ee_base_link`
+  origin; joint **5 does not** — it sits 120.5 mm up the forearm. (An earlier draft of
+  this section claimed all three did.) It behaves as a spherical wrist anyway, because
+  that offset lies along joint 5's *own* axis, so `q₅` cannot move the wrist centre.
+  `just sew-stage3-check` asserts it that way round, since that is the property
+  anything downstream actually uses.
 - **Shoulder is *not* spherical**: joints 1 and 2 intersect (their 0.06 offset lies
   along joint 1's own axis), but joint 3's axis is offset **66.25 mm** from that
   intersection. This breaks textbook closed-form S-R-S IK — but it is *irrelevant*
@@ -827,8 +833,13 @@ link down. Joint 3 (the humeral roll we currently ignore) and joint 4 (elbow fle
 fall out together.
 
 **Stage 3 — wrist (solves joints 5, 6, 7).**
-`R⁰⁷_des = H · R_alignᵀ · (R⁷_local)ᵀ`; align joint 7's axis via Subproblem 2 on
-joints 5–6, then **Subproblem 1** (circle-point) for joint 7's residual roll.
+`R⁰⁷_des = H · R_alignᵀ · (R⁷_local)ᵀ` — read right to left as "peel the constants off
+the goal": the tool frame must sit where the hand is, and the tool frame is joint 7's
+frame plus a fixed axis relabelling (`R_align`) and a fixed mount (`R⁷_local`), so what
+the *joints* must deliver is the goal with both stripped off. Then align joint 7's axis
+via Subproblem 2 on joints 5–6, and **Subproblem 1** (circle-point) for joint 7's
+residual roll. On OpenArm both constants are identity and the two subproblems collapse
+into one Euler decomposition — §7.8.
 
 Optimality (Proposition 3) holds when consecutive axes are perpendicular ✅, the
 humanoid base-link structure matches ✅, and the input is in a **body-centric frame**
@@ -838,20 +849,24 @@ humanoid base-link structure matches ✅, and the input is in a **body-centric f
 
 Three concrete gotchas, all checked against the XML:
 
-1. **Stage 3 column index.** SEW-Mimic assumes joint 7's axis is parallel to the EE
-   mount normal and uses `R⁰⁷_des[:, 1]`. On OpenArm v2, joint 7's axis is `x` while
-   the gripper approaches along `-z` (§3). Use the **`x` column, index 0**, and
-   double-check the `R⁷_local` convention. Structurally identical, but getting this
-   wrong will silently produce a plausible-looking wrong wrist.
+1. **Stage 3 is the paper's *perpendicular wrist* case — DONE, see §7.8.** An earlier
+   draft of this note said to keep Algorithm 3's Subproblem-2 structure and swap the
+   column index to 0, since joint 7's axis is `x` while the gripper approaches along
+   `-z` (§3). That works, but it misses that the paper handles this exact geometry
+   separately, in its appendix §C, and prescribes **Euler decomposition instead of
+   SP1/SP2**. On OpenArm that collapses to a plain intrinsic Z-Y-X — no subproblem
+   library at all, the same way stages 1–2 collapsed to trigonometry.
 
-2. **Hand orientation `H` — the input now exists.** MediaPipe Pose alone can't give
-   it; a wrist landmark is a point, and a point has no rotation. Staged plan:
+2. **Hand orientation `H` — DONE.** MediaPipe Pose alone can't give it; a wrist
+   landmark is a point, and a point has no rotation. Staged plan:
    - **Phase A** — skip stage 3 entirely; hold joints 5/6/7 at a fixed neutral posture.
      Stages 1–2 alone already fix §2.1, §2.3 and the elbow criterion. Ship this first.
    - **Phase B — DONE on the input side.** See §7.7. `H` is measured, logged and
-     recorded on every frame. What remains is *consuming* it: stage 3 itself.
+     recorded on every frame.
+   - **Phase B′ — DONE, consuming it.** See §7.8.
    - **Phase C** — [HaMeR](https://github.com/geopavlakos/hamer) or WiLoR for a proper
-     MANO wrist rotation, if latency budget allows.
+     MANO wrist rotation, if latency budget allows. §9.4's measurement decides whether
+     this is needed; the `hand_roll` clip is what makes that call.
 
 3. **The robot arms hang along `−z` at `qpos=0`, mounted at `(0, ±0.031, 0)`.** Get
    the base-frame convention and the left/right axis sign differences (joints 1 and 6,
@@ -861,11 +876,15 @@ Three concrete gotchas, all checked against the XML:
 
 ```
 backend/app/retarget/
-  subproblems.py    # Paden–Kahan SP1, SP2 — ~120 lines of numpy, or pip a solver
-  sew.py            # AlignAxis + the three stages
-  frames.py         # torso frame construction (shared with §6.2)
-  safety.py         # XPBD capsule filter (phase 3, optional)
+  sew.py            # all three stages — no subproblem library needed, see §0.2, §7.8
+  mapper.py         # torso frame + hand frame (§6.2, §7.7)
+  safety.py         # XPBD capsule filter (phase 4, optional, not built)
 ```
+
+The original plan here listed a `subproblems.py` for Paden–Kahan SP1/SP2 and a separate
+`frames.py`. Neither was needed: **all three stages closed-form out to elementary
+trigonometry on this arm**, and the frame construction was small enough to live beside
+the landmark schema it is built from.
 
 **Phase 0 — validate the geometry.** Write a test that, for a known `q`, does forward
 kinematics in MuJoCo and confirms joint 3's axis is collinear with the
@@ -880,7 +899,9 @@ axes with known answers.
 **Phase 2 — stages 1 and 2 only**, joints 5–7 held neutral. Run the battery. This
 alone should eliminate the lock-ups and fix the raise-arm-to-the-side case.
 
-**Phase 3 — stage 3** once hand orientation exists (7.4 #2).
+**Phase 3 — stage 3** once hand orientation exists (7.4 #2). **Done — §7.8.** Phase 1
+turned out to be unnecessary for it: the perpendicular-wrist form needs no subproblem
+solver either.
 
 **Phase 4 — the XPBD safety filter** for midline crossing, if self-collision shows up
 in the battery. Overapproximate each link with a capsule
@@ -951,10 +972,102 @@ random rotations per side recovers `R` to 1.8e-15; mirroring a right hand's
 landmarks and reading them as a left hand yields exactly `M·R·M`; all three
 degenerate cases return `None`.
 
-**Still to do:** stage 3 itself. `H` is measured and recorded; nothing consumes it,
-and joints 5/6/7 remain neutral. The `hand_roll` battery clip exists to test that
-work when it happens. Watch §7.4 #1 — OpenArm's joint 7 axis is `x`, not the
-paper's assumed mount normal.
+**Consumed by stage 3 as of §7.8.** The `hand_roll` battery clip exists to measure
+whether it is *good enough*, which is still open (§9.4).
+
+### 7.8 Stage 3 — BUILT
+
+[`sew.py`](backend/app/retarget/sew.py) (`wrist_euler_signs`, `solve_wrist`,
+`WristSolver`) and `Retargeter._wrist_target` / `_solve_sew`. `just sew-stage3-check`,
+34 properties, both arms.
+
+**The finding that made it small, exactly parallel to §0.2's.** OpenArm is the paper's
+*perpendicular wrist*, so its appendix §C applies: Euler decomposition rather than
+SP1/SP2. And because no body in the arm chain carries a `quat`, every `R_local` is the
+identity and the wrist factors into elementary rotations:
+
+```
+R⁴⁷ = Rz(−q₅) · Ry(s·q₆) · Rx(q₇),     s = −1 left, +1 right
+```
+
+Verified against `mj_forward` to **7.8e-16** over 200 random full-range configs per
+arm. The signs are read off `m.jnt_axis` at startup — the paper's eqs (16)–(18) — and
+`wrist_euler_signs` **raises** rather than guessing if the model stops matching.
+
+The first column of `R⁴⁷_des` is where joint 7's axis must point, so `q₅,q₆` aim it and
+`q₇` rolls about it. That *is* Algorithm 3's structure (SP2 then SP1), written out.
+
+**Both of the paper's constants are identity here, and both are still in the code.**
+`R⁷ᵀ_local = I` because the control point site carries no rotation and sits on joint
+7's origin (measured at startup, not assumed). `R_align = I` because
+[`hand_orientation`](backend/app/retarget/mapper.py) was written to emit `H` in the
+robot's own ee convention — the alignment was paid for in the perception layer. So
+`R⁰⁷_des = H R_alignᵀ (R⁷ᵀ_local)ᵀ` reduces to `H`. Named rather than dropped: they
+are identity for reasons that a model change or a convention change would break.
+
+**Two structural gifts, both asserted in the check:**
+
+- **No gimbal lock.** The decomposition degenerates at `q₆ = ±90°` — the paper's
+  Remark 5, which argues it is *rare*. Joint 6 stops at **±45°**, so it is not rare, it
+  is unreachable. Stronger than the paper's own guarantee.
+- **No second branch.** The other Euler solution needs `|π − b| ≥ 135°`, also outside
+  joint 6's range. So stage 3 is **stateless wherever the target is reachable**.
+
+**The one real problem, which the check caught and the derivation did not predict.**
+`q₅` and `q₇` both come from `arctan2`, and an `arctan2` angle *wraps* — while out of
+range. At the far side of the wrap it flips between `+π` and `−π`, and the two joint
+stops are equally close and equally wrong. Clamping alone picks whichever side it
+landed on and **slams the wrist 180°**. `_stops()` therefore returns *both* stops when
+an angle doesn't fit, and all candidates are scored with the same bounded-tolerance
+tie-break the stage-1/2 branch policy uses (`WRIST_SWITCH_TOLERANCE`, 15°). Measured,
+parked on a switch point under 5° of hand-orientation noise:
+
+| | 180° flips / 2000 frames | p95 step |
+| --- | --- | --- |
+| clamp only | 508 | 180° |
+| both stops + tie-break | **16** | **14.0°** |
+
+Worth being straight about the limit: on a *monotone* sweep the tie-break changes
+nothing (4 switches either way). It suppresses **chatter**; it cannot prevent a
+crossing that genuinely happens. A 180° command change in the unreachable region is
+real and remains, which is what makes the slew limiter (§6.3, still unstarted)
+load-bearing rather than cosmetic. The check asserts continuity where the target is
+reachable and *bounds the count* of switches where it isn't, rather than pretending to
+zero.
+
+**Where it ended up:**
+
+| | result |
+| --- | --- |
+| reachable pose, `q → H → q` round trip | `3.8e-14 deg` |
+| reachable pose, achieved orientation vs `H` | `5.1e-06 deg` |
+| stage 3 disturbs stages 1–2 by | `1.5e-06 deg` (exactly zero in exact arithmetic) |
+| reachable sweep, worst frame step | `0.14 deg` |
+| uniform random SO(3) | 16.3% exact, median residual 36.3° |
+
+That last row is the honest one and it is **not** a solver limitation: joint 6 spans
+±45° against a human wrist's ~±70° of flexion, so clamping is routine, not
+exceptional. `Wrist.clamped` surfaces it per joint so telemetry can tell "the retarget
+is wrong" from "the robot doesn't bend that way". Uniform SO(3) is also a pessimistic
+prior — real hand orientations correlate strongly with the forearm stage 2 already
+matched. Two failure modes worth distinguishing, and the telemetry reports both:
+saturating `q₅` costs **roll** and leaves the approach axis exact, while saturating
+`q₆` costs the **approach direction** itself, which is the one a viewer notices.
+
+**Policy for a lost hand.** MediaPipe Hands drops out constantly where the pose model
+does not, so a wrist that decays on the first miss would sag and snap back with every
+flicker. `WristSolver.hold()` keeps the pose through `WRIST_HOLD_FRAMES` (5, ~0.17 s)
+and only then eases toward rest at `REST_RELAXATION`. A degenerate hand frame
+(`hand_orientation` returning `None`) takes the same path, per-arm and independently.
+
+**Still to do:** the hand landmarks are not filtered at all — note that §6.3's
+`smoothing.py` does not exist in this tree, so this is downstream of the 1€ filter
+landing rather than an extension of it — and the hand frame's own observability — `|f × k|`,
+how well the knuckle line fixes the roll — is measured but thrown away at a hard
+threshold rather than fed in as a shrinkage weight. That is §0.4's lesson 5 waiting to
+be applied one stage down: `z_H = −f` exactly, so `H` is fully determined by `f` plus
+one roll angle about it, and only that angle is poorly conditioned.
+
 ---
 
 ## 8. Alternative and complementary tracks
@@ -1208,7 +1321,7 @@ whole-body teleop via RL, and all far past the scope of an arm-only sim assessme
 ```
 [x] §5   record/replay harness                    ← built
 [ ] §5   record the battery                       ← needs a camera; gates every A/B
-[x] §7.7 hand tracking → hand orientation H       ← done; stage 3 still unwired
+[x] §7.7 hand tracking → hand orientation H       ← done, and consumed by §7.8
 [~] §6.4 metrics + JSONL logging                  ← replay reports most of it;
                                                     the LIVE path still logs nothing
 [~] §6.3 1€ filter + slew limit                   ← filter done, slew limit next
@@ -1220,7 +1333,9 @@ whole-body teleop via RL, and all far past the scope of an arm-only sim assessme
 [ ] §7   SEW-Mimic phases 0→2                     ← the real fix
 [ ] §11  intermediate target schema               ← lands with §7
 [ ] §6.6 limb-length constraint + T-pose calib
-[ ] §7.4 SEW-Mimic phase 3, consuming H           ← test with the hand_roll clip
+[x] §7.4 SEW-Mimic phase 3, consuming H           ← done, §7.8; hand_roll clip still
+                                                    needed to measure whether the
+                                                    hand frame is good enough (§9.4)
 [ ] §8.1 mink, if we want exact wrist position on top of SEW
 [ ] §7.5 phase 4: XPBD self-collision filter, if the battery shows collisions
 ```
